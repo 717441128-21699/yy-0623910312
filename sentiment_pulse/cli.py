@@ -28,9 +28,18 @@ def _handle_signal(signum, frame):
     click.secho("⏹  正在停止观察模式，保存最后一轮后退出...", fg="yellow")
 
 
+def _get_recent_scan_details(game, sources_list, time_range, limit=3):
+    recent = storage.list_scans(game=game, sources=sources_list, time_range=time_range, limit=limit)
+    details = []
+    for s in recent:
+        d = storage.get_scan_by_id(s["id"])
+        if d:
+            details.append(d)
+    return details
+
+
 def _do_single_scan(game, sources_list, time_range, per_source_limit, no_save,
                     watch_mode=False, round_idx=None):
-    """执行单次扫描，返回 (result_dict, success_bool)"""
     try:
         posts, statuses = source_module.fetch_all(game, sources_list, time_range,
                                                     per_source_limit=per_source_limit)
@@ -39,7 +48,9 @@ def _do_single_scan(game, sources_list, time_range, per_source_limit, no_save,
         return None, False
 
     if round_idx is None:
-        display.render_source_statuses(statuses)
+        recent_details = _get_recent_scan_details(game, sources_list, time_range, limit=3)
+        health_warnings = display.detect_source_health(statuses, recent_details)
+        display.render_source_statuses(statuses, health_warnings=health_warnings)
 
     ok_sources = [n for n, s in statuses.items() if s.get("ok") and s.get("count", 0) > 0]
 
@@ -80,6 +91,7 @@ def _do_single_scan(game, sources_list, time_range, per_source_limit, no_save,
             negative_snippets=result["negative_snippets"],
             top_links=result["top_links"],
             source_statuses=statuses,
+            group_alerts=result["group_alerts"],
             watch_mode=watch_mode,
         )
         try:
@@ -113,13 +125,11 @@ def cli():
 @click.option("--interval", default=WATCH_INTERVAL_DEFAULT, show_default=True, type=int,
               help=f"观察模式下每次轮询间隔秒数，最少 {WATCH_INTERVAL_MIN} 秒")
 def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
-    """执行舆情巡检"""
     if not sources:
         sources = tuple(DEFAULT_SOURCES)
     sources_list = sorted(set(sources))
 
     if not watch_mode:
-        # 单次扫描
         display.render_info(f"正在扫描社区... 游戏=[bold yellow]{game}[/bold yellow]  "
                             f"来源=[bold cyan]{', '.join(sources_list)}[/bold cyan]  "
                             f"窗口=[bold]{time_range}[/bold]")
@@ -168,7 +178,6 @@ def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
         while _watch_running:
             round_idx += 1
 
-            # 第一轮显示完整，后续轮次显示摘要
             if round_idx == 1:
                 display.render_info(f"🔄 第 {round_idx} 轮扫描 (完整输出)...")
                 result, ok = _do_single_scan(
@@ -199,7 +208,6 @@ def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
                     click.secho(f"   下一轮: {time.strftime('%H:%M:%S', time.localtime(time.time() + interval))}",
                                 dim=True)
 
-            # 等待下一轮，每 1 秒检查一次是否停止
             if not _watch_running:
                 break
             for _ in range(interval):
@@ -214,10 +222,19 @@ def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
         pass
 
     click.echo()
+
+    # 观察模式结束后显示趋势摘要
+    if round_idx >= 2:
+        recent_details = _get_recent_scan_details(game, sources_list, time_range, limit=round_idx)
+        if len(recent_details) >= 2:
+            display.render_trend_summary(reversed(recent_details))
+            click.echo()
+
     display.render_success(
         f"✅ 观察模式结束  |  共运行 [bold]{round_idx}[/bold] 轮  |  "
         f"游戏: [bold yellow]{game}[/bold yellow]  |  窗口: [bold]{time_range}[/bold]\n"
-        f"   使用 'history -g \"{game}\"' 查看所有历史记录"
+        f"   使用 'history -g \"{game}\"' 查看所有历史记录\n"
+        f"   使用 'history compare <id1> <id2>' 对比任意两次巡检"
     )
 
 
@@ -291,7 +308,6 @@ def synonyms_list():
     from rich.table import Table
     from rich.panel import Panel
     from rich import box
-    from datetime import datetime
     table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
     table.add_column("组名", style="bold magenta", min_width=14)
     table.add_column("状态", width=8, justify="center")
@@ -336,7 +352,7 @@ def synonyms_remove(label):
         display.render_error(f"未找到同义词组: '{label}'")
 
 
-@cli.group(help="📋 历史巡检记录（可筛选、查看详情、导出Markdown）", invoke_without_command=True)
+@cli.group(help="📋 历史巡检记录（可筛选、对比、查看详情、导出Markdown）", invoke_without_command=True)
 @click.option("-g", "--game", help="按游戏名过滤")
 @click.option("-s", "--source", "sources", multiple=True,
               type=click.Choice(DEFAULT_SOURCES),
@@ -358,7 +374,6 @@ def history(ctx, game, sources, time_range, limit):
 
     from rich.table import Table
     from rich.panel import Panel
-    from rich import box
     from datetime import datetime
 
     table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
@@ -396,7 +411,7 @@ def history(ctx, game, sources, time_range, limit):
     if subtitle:
         panel_title += f"\n{subtitle}"
     display.console.print(Panel(table, title=panel_title, border_style="cyan", box=box.ROUNDED))
-    click.secho("💡 查看详情: pulse history show <id>   |   导出报告: pulse history export -o report.md",
+    click.secho("💡 查看详情: pulse history show <id>   |   对比: pulse history compare <id1> <id2>   |   导出: pulse history export -o report.md",
                 dim=True)
 
 
@@ -408,6 +423,25 @@ def history_show(scan_id):
         display.render_error(f"未找到 ID 为 {scan_id} 的巡检记录")
         sys.exit(1)
     display.render_scan_detail(scan)
+
+
+@history.command(name="compare", help="对比两次巡检的差异（补丁前后看变化）")
+@click.argument("scan_id_a", type=int)
+@click.argument("scan_id_b", type=int)
+def history_compare(scan_id_a, scan_id_b):
+    scan_a = storage.get_scan_by_id(scan_id_a)
+    scan_b = storage.get_scan_by_id(scan_id_b)
+    if not scan_a:
+        display.render_error(f"未找到 ID 为 {scan_id_a} 的巡检记录")
+        sys.exit(1)
+    if not scan_b:
+        display.render_error(f"未找到 ID 为 {scan_id_b} 的巡检记录")
+        sys.exit(1)
+
+    if scan_a["scanned_at"] > scan_b["scanned_at"]:
+        scan_a, scan_b = scan_b, scan_a
+
+    display.render_compare(scan_a, scan_b)
 
 
 @history.command(name="export", help="导出筛选后的历史记录为 Markdown 报告")
@@ -429,7 +463,6 @@ def history_export(output, game, sources, time_range, limit, title):
         display.render_error("没有符合条件的巡检记录可导出")
         sys.exit(1)
 
-    # 补全每条的详细数据
     full_scans = []
     for s in scans:
         detail = storage.get_scan_by_id(s["id"])
@@ -458,7 +491,6 @@ def info():
     from .config import HOME_DIR, DB_PATH, DEFAULT_WATCHLIST, ALERT_CHANGE_THRESHOLD, ALERT_MIN_COUNT
     from rich.table import Table
     from rich.panel import Panel
-    from rich import box
 
     table = Table(show_header=False, box=box.ROUNDED, expand=True)
     table.add_column("配置项", style="bold cyan")

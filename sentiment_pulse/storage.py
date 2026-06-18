@@ -37,6 +37,7 @@ def init_db():
                 negative_snippets_json TEXT,
                 top_links_json TEXT,
                 source_statuses_json TEXT,
+                group_alerts_json TEXT,
                 watch_mode INTEGER DEFAULT 0
             )
         """)
@@ -90,6 +91,7 @@ def _migrate_scans_table(conn):
         ("negative_snippets_json", "TEXT"),
         ("top_links_json", "TEXT"),
         ("source_statuses_json", "TEXT"),
+        ("group_alerts_json", "TEXT"),
         ("watch_mode", "INTEGER DEFAULT 0"),
     ]
     for col_name, col_def in new_columns:
@@ -173,6 +175,7 @@ def save_scan(
     negative_snippets: List[Dict] = None,
     top_links: List[Dict] = None,
     source_statuses: Dict[str, Dict] = None,
+    group_alerts: List[Dict] = None,
     watch_mode: bool = False,
 ) -> int:
     now = int(time.time())
@@ -182,8 +185,8 @@ def save_scan(
             """INSERT INTO scans
                (game, sources, time_range, scanned_at, keyword_freq, total_posts, negative_posts,
                 avg_sentiment, alerts_json, top_keywords_json, negative_snippets_json,
-                top_links_json, source_statuses_json, watch_mode)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                top_links_json, source_statuses_json, group_alerts_json, watch_mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (game, sources_key, time_range, now,
              json.dumps(keyword_freq, ensure_ascii=False),
              total_posts, negative_posts, avg_sentiment,
@@ -192,6 +195,7 @@ def save_scan(
              json.dumps(negative_snippets or [], ensure_ascii=False),
              json.dumps(top_links or [], ensure_ascii=False),
              json.dumps(source_statuses or {}, ensure_ascii=False),
+             json.dumps(group_alerts or [], ensure_ascii=False),
              1 if watch_mode else 0)
         )
         return cur.lastrowid
@@ -222,6 +226,7 @@ def get_previous_scan(game: str, sources: List[str], time_range: str) -> Optiona
             "negative_snippets": json.loads(row["negative_snippets_json"] or "[]"),
             "top_links": json.loads(row["top_links_json"] or "[]"),
             "source_statuses": json.loads(row["source_statuses_json"] or "{}"),
+            "group_alerts": json.loads(row["group_alerts_json"] or "[]"),
         }
 
 
@@ -246,6 +251,7 @@ def get_scan_by_id(scan_id: int) -> Optional[Dict]:
             "negative_snippets": json.loads(row["negative_snippets_json"] or "[]"),
             "top_links": json.loads(row["top_links_json"] or "[]"),
             "source_statuses": json.loads(row["source_statuses_json"] or "{}"),
+            "group_alerts": json.loads(row["group_alerts_json"] or "[]"),
             "watch_mode": bool(row["watch_mode"]),
         }
 

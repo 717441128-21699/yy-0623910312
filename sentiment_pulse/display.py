@@ -1,11 +1,10 @@
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich.tree import Tree
 from rich import box
 
 from .config import DEFAULT_SOURCES
@@ -45,6 +44,24 @@ def _sentiment_bar(avg: float, width: int = 20) -> Text:
     else:
         style = "green"
     return Text(f"[{bar}] {avg:.0%}", style=style)
+
+
+def _delta_str(d: int) -> str:
+    if d > 0:
+        return f"+{d}"
+    elif d < 0:
+        return str(d)
+    return "~"
+
+
+def _ratio_str(r) -> str:
+    if isinstance(r, str):
+        return r
+    if isinstance(r, (int, float)):
+        if r == float("inf"):
+            return "NEW"
+        return f"x{round(r, 1)}"
+    return str(r)
 
 
 def render_header(game: str, sources: List[str], time_range: str, scanned_at: int, round_idx: int = None):
@@ -100,7 +117,6 @@ def render_sentiment(summary: Dict, previous_summary: Dict = None):
 
 
 def render_group_alerts(group_alerts: List[Dict]):
-    """渲染同义词组合并告警（置顶，更醒目）"""
     if not group_alerts:
         return
     table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
@@ -113,13 +129,12 @@ def render_group_alerts(group_alerts: List[Dict]):
     table.add_column("构成", style="dim")
 
     for a in group_alerts:
-        kw_style = "bold red" if a["watched"] else "bold"
-        kw = Text(a["label"], style=kw_style)
-        if a["watched"]:
+        kw_style = "bold red" if a.get("watched") else "bold"
+        kw = Text(a.get("label", a.get("keyword", "")), style=kw_style)
+        if a.get("watched"):
             kw.append(" ★", style="yellow")
         type_style = "bold red" if a["type"] == "spike" else "bold magenta"
         type_txt = Text("突增" if a["type"] == "spike" else "新现", style=type_style)
-        # 构成示例：闪退×3 + 崩溃×2
         breakdown_parts = []
         for w, c in sorted(a.get("breakdown", {}).items(), key=lambda x: -x[1]):
             breakdown_parts.append(f"{w}×{c}")
@@ -132,7 +147,6 @@ def render_group_alerts(group_alerts: List[Dict]):
             _fmt_ratio(a["ratio"]),
             breakdown_txt,
         )
-        # 代表原句
         reps = a.get("representative_posts", [])
         if reps:
             rep = reps[0]
@@ -142,10 +156,8 @@ def render_group_alerts(group_alerts: List[Dict]):
             src = rep.get("source", "")
             table.add_row(
                 Text("  💬 代表原句", style="dim"),
-                Text("", style="dim"),
-                Text("", style="dim"),
-                Text("", style="dim"),
-                Text("", style="dim"),
+                Text("", style="dim"), Text("", style="dim"),
+                Text("", style="dim"), Text("", style="dim"),
                 Text("", style="dim"),
                 Text(f"[{src}] {snippet}", style="dim italic"),
             )
@@ -175,15 +187,14 @@ def render_alerts(alerts: List[Dict]):
         type_style = "bold red" if a["type"] == "spike" else "bold magenta"
         type_txt = Text("突增" if a["type"] == "spike" else "新现", style=type_style)
         table.add_row(
-            kw,
-            type_txt,
+            kw, type_txt,
             str(a["current"]),
             str(a["previous"]),
             _fmt_delta(a["delta"]),
             _fmt_ratio(a["ratio"]),
         )
-    panel = Panel(table, title="[bold red]⚠️ 关注提醒 / 异常波动[/bold red]", border_style="red", box=box.ROUNDED)
-    console.print(panel)
+    console.print(Panel(table, title="[bold red]⚠️ 关注提醒 / 异常波动[/bold red]",
+                        border_style="red", box=box.ROUNDED))
 
 
 def render_keywords(keywords: List[Dict]):
@@ -290,7 +301,7 @@ def render_watchlist(watchlist: List[Dict]):
     console.print(Panel(table, title="[bold]⭐ 关注清单[/bold]", border_style="magenta", box=box.ROUNDED))
 
 
-def render_source_statuses(statuses: Dict[str, Dict]):
+def render_source_statuses(statuses: Dict[str, Dict], health_warnings: List[str] = None):
     table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
     table.add_column("来源", style="bold", width=12)
     table.add_column("状态", width=10, justify="center")
@@ -311,6 +322,11 @@ def render_source_statuses(statuses: Dict[str, Dict]):
 
     console.print(Panel(table, title="[bold]📡 来源抓取状态[/bold]", border_style="cyan", box=box.ROUNDED))
 
+    if health_warnings:
+        for w in health_warnings:
+            console.print(Panel(w, title="[bold yellow]⚠️ 来源健康提醒[/bold yellow]",
+                                border_style="yellow", box=box.ROUNDED, style="yellow"))
+
 
 def _render_status_row(table, src_name: str, st: Dict):
     source_label = {
@@ -323,7 +339,10 @@ def _render_status_row(table, src_name: str, st: Dict):
         status = Text("成功", style="bold green")
         count = str(st.get("count", 0))
         raw = str(st.get("raw_count", st.get("count", 0)))
-        tu = str(st.get("time_unknown_count", 0))
+        tu_count = st.get("time_unknown_count", 0)
+        raw_count = st.get("raw_count", st.get("count", 0)) or 1
+        tu_pct = tu_count / raw_count * 100 if raw_count > 0 else 0
+        tu = f"{tu_count} ({tu_pct:.0f}%)" if tu_count > 0 else "0"
         fo = str(st.get("filtered_out_by_time", 0))
     else:
         status = Text("不可用", style="bold red")
@@ -334,13 +353,43 @@ def _render_status_row(table, src_name: str, st: Dict):
     table.add_row(source_label, status, count, raw, tu, fo)
 
 
+def detect_source_health(statuses: Dict[str, Dict], recent_scans: List[Dict] = None) -> List[str]:
+    """检测来源持续问题：连续不可用/时间未知过高/样本归零"""
+    warnings = []
+    for src_name, st in statuses.items():
+        if not st.get("ok"):
+            fail_count = 1
+            if recent_scans:
+                for s in recent_scans:
+                    ss = s.get("source_statuses", {})
+                    if src_name in ss and not ss[src_name].get("ok", True):
+                        fail_count += 1
+            if fail_count >= 2:
+                warnings.append(f"🔴 {src_name} 已连续 {fail_count} 次不可用，建议检查网络或换来源")
+            elif fail_count == 1:
+                warnings.append(f"🟡 {src_name} 当前不可用: {st.get('reason', '未知')}")
+        else:
+            tu_count = st.get("time_unknown_count", 0)
+            raw = st.get("raw_count", st.get("count", 0)) or 1
+            if raw > 0 and tu_count / raw > 0.5:
+                warnings.append(f"🟡 {src_name} 时间不明占比 {tu_count/raw*100:.0f}%，短窗口统计可能不准确")
+            if st.get("count", 0) == 0 and raw > 0:
+                warnings.append(f"🟡 {src_name} 窗口内 0 条帖子（原始 {raw} 条），考虑扩大时间窗口")
+            if recent_scans and len(recent_scans) >= 2:
+                prev_ss = recent_scans[0].get("source_statuses", {})
+                prev_count = prev_ss.get(src_name, {}).get("count", -1)
+                cur_count = st.get("count", 0)
+                if prev_count > 10 and cur_count == 0:
+                    warnings.append(f"🔴 {src_name} 样本从 {prev_count} 突然归零，可能API异常或被封")
+    return warnings
+
+
 def render_watch_round_summary(
     round_idx: int,
     scanned_at: int,
     result: Dict,
     previous_result: Dict = None,
 ):
-    """观察模式下每轮的简短摘要"""
     ts = datetime.fromtimestamp(scanned_at).strftime("%H:%M:%S")
     sent = result["sentiment"]
     t = sent["total"]
@@ -354,15 +403,8 @@ def render_watch_round_summary(
     alerts_cnt = len(result.get("alerts", [])) + len(result.get("group_alerts", []))
     alerts_label = f"[bold red]{alerts_cnt} 条告警[/bold red]" if alerts_cnt > 0 else "[green]无告警[/green]"
 
-    prev_neg_pct = None
-    if previous_result:
-        pt = previous_result.get("total", 0) or 1
-        pn = previous_result.get("negative", 0)
-        prev_neg_pct = pn / pt * 100
-
     summary.add_row(f"[#{round_idx:02d}] {ts}", f"样本 {t} 条 | 负面 {neg} ({neg_pct:.0f}%) | {alerts_label}")
 
-    # 列出前3个告警或热词
     top_items = []
     for ga in result.get("group_alerts", [])[:2]:
         top_items.append(f"[red]🚨 {ga['label']} +{ga['delta']} ({ga['current']})[/red]")
@@ -372,6 +414,137 @@ def render_watch_round_summary(
         summary.add_row("", "  " + "  ".join(top_items))
 
     console.print(Panel(summary, border_style="cyan", box=box.ROUNDED))
+
+
+def render_trend_summary(scans: List[Dict]):
+    """渲染观察模式的趋势摘要（最近N轮）"""
+    if len(scans) < 2:
+        return
+
+    table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
+    table.add_column("轮次", style="bold", width=8)
+    table.add_column("时间", width=10)
+    table.add_column("样本", justify="right", width=6)
+    table.add_column("负面率", justify="right", width=8)
+    table.add_column("情绪", justify="right", width=6)
+    table.add_column("告警", justify="center", width=10)
+    table.add_column("问题组趋势", style="dim")
+
+    for s in scans:
+        ts = datetime.fromtimestamp(s["scanned_at"]).strftime("%H:%M")
+        total = s.get("total_posts", 0)
+        neg = s.get("negative_posts", 0)
+        neg_pct = f"{neg/total*100:.1f}%" if total else "0%"
+        avg = s.get("avg_sentiment", 0)
+        avg_str = f"{avg:.2f}"
+        if avg < 0.35:
+            avg_str = f"[red]{avg_str}[/red]"
+        elif avg < 0.65:
+            avg_str = f"[yellow]{avg_str}[/yellow]"
+        else:
+            avg_str = f"[green]{avg_str}[/green]"
+
+        alerts = s.get("alerts", [])
+        group_alerts = s.get("group_alerts", [])
+        alert_cnt = len(alerts) + len(group_alerts)
+        alert_str = f"[red]{alert_cnt}[/red]" if alert_cnt > 0 else "[green]0[/green]"
+
+        group_trends = []
+        for ga in group_alerts[:3]:
+            label = ga.get("label", "")
+            delta = ga.get("delta", 0)
+            arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+            color = "red" if delta > 0 else ("green" if delta < 0 else "dim")
+            group_trends.append(f"[{color}]{label} {arrow}{delta}[/{color}]")
+        group_str = "  ".join(group_trends) if group_trends else "-"
+
+        table.add_row(f"#{s.get('id', '?')}", ts, str(total), neg_pct, avg_str, alert_str, group_str)
+
+    console.print(Panel(table, title="[bold]📈 观察趋势摘要[/bold]", border_style="magenta", box=box.ROUNDED))
+
+
+def render_compare(scan_a: Dict, scan_b: Dict):
+    """对比两次巡检，A=旧 B=新"""
+    ts_a = datetime.fromtimestamp(scan_a["scanned_at"]).strftime("%m-%d %H:%M")
+    ts_b = datetime.fromtimestamp(scan_b["scanned_at"]).strftime("%m-%d %H:%M")
+
+    # 情绪对比
+    grid = Table.grid(expand=True, padding=(0, 2))
+    grid.add_column()
+    grid.add_column(justify="right", style="bold cyan")
+    grid.add_column(justify="right", style="bold yellow")
+
+    t_a = scan_a.get("total_posts", 0) or 1
+    t_b = scan_b.get("total_posts", 0) or 1
+    neg_a = scan_a.get("negative_posts", 0)
+    neg_b = scan_b.get("negative_posts", 0)
+    pct_a = neg_a / t_a * 100
+    pct_b = neg_b / t_b * 100
+    avg_a = scan_a.get("avg_sentiment", 0)
+    avg_b = scan_b.get("avg_sentiment", 0)
+
+    grid.add_row("", f"[cyan]A ({ts_a})[/cyan]", f"[yellow]B ({ts_b})[/yellow]")
+    grid.add_row("样本量", str(t_a), str(t_b))
+    grid.add_row("负面率", f"{pct_a:.1f}%", f"{pct_b:.1f}%")
+    neg_delta = pct_b - pct_a
+    grid.add_row("负面率变化", "", f"{'+' if neg_delta >= 0 else ''}{neg_delta:.1f}%")
+    grid.add_row("平均情绪", f"{avg_a:.2f}", f"{avg_b:.2f}")
+    console.print(Panel(grid, title="[bold]📊 对比概览  A(旧) vs B(新)[/bold]",
+                        border_style="magenta", box=box.ROUNDED))
+    console.print()
+
+    # 热词对比
+    kw_a = {k["keyword"]: k for k in scan_a.get("top_keywords", [])}
+    kw_b = {k["keyword"]: k for k in scan_b.get("top_keywords", [])}
+    all_kw = sorted(set(kw_a.keys()) | set(kw_b.keys()),
+                    key=lambda k: -(kw_b.get(k, {}).get("count", 0) + kw_a.get(k, {}).get("count", 0)))
+
+    kw_table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
+    kw_table.add_column("热词", style="bold", min_width=12)
+    kw_table.add_column("A次数", justify="right")
+    kw_table.add_column("B次数", justify="right")
+    kw_table.add_column("变化", justify="right")
+
+    shown = 0
+    for k in all_kw:
+        ca = kw_a.get(k, {}).get("count", 0)
+        cb = kw_b.get(k, {}).get("count", 0)
+        if ca == 0 and cb == 0:
+            continue
+        delta = cb - ca
+        if ca > 0:
+            ratio = cb / ca
+        else:
+            ratio = float("inf") if cb > 0 else 1.0
+        style = "red" if delta > 3 else ("green" if delta < -3 else "")
+        delta_str = _delta_str(delta)
+        ratio_str = _ratio_str(ratio) if ratio != 1.0 else ""
+        change = f"{delta_str} {ratio_str}".strip()
+        kw_table.add_row(k, str(ca), str(cb), f"[{style}]{change}[/{style}]" if style else change)
+        shown += 1
+        if shown >= 20:
+            break
+
+    console.print(Panel(kw_table, title="[bold]🔥 热词对比[/bold]", border_style="yellow", box=box.ROUNDED))
+    console.print()
+
+    # 告警对比
+    alerts_b = scan_b.get("alerts", [])
+    group_alerts_b = scan_b.get("group_alerts", [])
+    if group_alerts_b:
+        render_group_alerts(group_alerts_b)
+        console.print()
+    if alerts_b:
+        render_alerts(alerts_b)
+        console.print()
+
+    # 链接对比：B的新增链接
+    links_a = {l["url"] for l in scan_a.get("top_links", [])}
+    links_b = scan_b.get("top_links", [])
+    new_links = [l for l in links_b if l["url"] not in links_a]
+    if new_links:
+        render_top_links(new_links)
+        console.print()
 
 
 def render_result(result: Dict, game: str, sources: List[str], time_range: str,
@@ -392,7 +565,6 @@ def render_result(result: Dict, game: str, sources: List[str], time_range: str,
 
 
 def render_scan_detail(scan: Dict):
-    """展开显示某次巡检的完整详情"""
     game = scan.get("game", "")
     sources = scan.get("sources", [])
     time_range = scan.get("time_range", "")
@@ -408,10 +580,14 @@ def render_scan_detail(scan: Dict):
     }
     total = sent_summary["total"]
     neg = sent_summary["negative"]
-    # 粗略估计中性/正面（因为没存全量）
     sent_summary["positive"] = max(0, total - neg)
     render_sentiment(sent_summary)
     console.print()
+
+    group_alerts = scan.get("group_alerts", [])
+    if group_alerts:
+        render_group_alerts(group_alerts)
+        console.print()
 
     alerts = scan.get("alerts", [])
     if alerts:
@@ -442,7 +618,6 @@ def export_markdown(
     scan: Dict,
     previous_scan: Dict = None,
 ) -> str:
-    """导出单次巡检为 Markdown 格式"""
     lines = []
     game = scan.get("game", "")
     sources = ", ".join(scan.get("sources", []))
@@ -460,23 +635,40 @@ def export_markdown(
     lines.append(f"- **平均情绪分**: {avg:.2f}")
     lines.append("")
 
-    # 告警
+    # 同义词组告警
+    group_alerts = scan.get("group_alerts", [])
+    if group_alerts:
+        lines.append("## 🚨 同义词组告警（合并统计）")
+        lines.append("")
+        lines.append("| 问题组 | 类型 | 当前 | 上次 | 变化 | 涨幅 | 构成 |")
+        lines.append("|--------|------|------|------|------|------|------|")
+        for ga in group_alerts:
+            delta = ga.get("delta", 0)
+            ratio = ga.get("ratio", 1)
+            breakdown_parts = [f"{w}×{c}" for w, c in sorted(ga.get("breakdown", {}).items(), key=lambda x: -x[1])]
+            bd = " + ".join(breakdown_parts[:4])
+            lines.append(f"| {ga.get('label','')} | {ga.get('type','')} | {ga.get('current',0)} | "
+                         f"{ga.get('previous',0)} | {_delta_str(delta)} | {_ratio_str(ratio)} | {bd} |")
+            reps = ga.get("representative_posts", [])
+            if reps:
+                for rep in reps[:2]:
+                    snippet = rep.get("content", "")[:100]
+                    src = rep.get("source", "")
+                    lines.append(f"  - 💬 [{src}] {snippet}")
+        lines.append("")
+
+    # 普通告警
     alerts = scan.get("alerts", [])
-    group_alerts = []  # 旧数据可能没有
-    if alerts or group_alerts:
+    if alerts:
         lines.append("## ⚠️ 异常波动")
         lines.append("")
         lines.append("| 关键词 | 类型 | 当前 | 上次 | 变化 | 涨幅 |")
         lines.append("|--------|------|------|------|------|------|")
         for a in alerts:
             delta = a.get("delta", 0)
-            delta_str = f"+{delta}" if delta > 0 else str(delta)
             ratio = a.get("ratio", 1)
-            if isinstance(ratio, (int, float)):
-                ratio_str = f"x{ratio}"
-            else:
-                ratio_str = str(ratio)
-            lines.append(f"| {a.get('keyword', '')} | {a.get('type', '')} | {a.get('current', 0)} | {a.get('previous', 0)} | {delta_str} | {ratio_str} |")
+            lines.append(f"| {a.get('keyword', '')} | {a.get('type', '')} | {a.get('current', 0)} | "
+                         f"{a.get('previous', 0)} | {_delta_str(delta)} | {_ratio_str(ratio)} |")
         lines.append("")
 
     # 高频词
@@ -488,13 +680,9 @@ def export_markdown(
         lines.append("|--------|------|------|------|")
         for kw in top_kw[:20]:
             delta = kw.get("delta", 0)
-            delta_str = f"+{delta}" if delta > 0 else (str(delta) if delta < 0 else "~")
             ratio = kw.get("ratio", 1)
-            if isinstance(ratio, (int, float)):
-                ratio_str = f"x{ratio}"
-            else:
-                ratio_str = str(ratio)
-            lines.append(f"| {kw.get('keyword', '')} | {kw.get('count', 0)} | {delta_str} | {ratio_str} |")
+            lines.append(f"| {kw.get('keyword', '')} | {kw.get('count', 0)} | "
+                         f"{_delta_str(delta)} | {_ratio_str(ratio)} |")
         lines.append("")
 
     # 负面原句
@@ -520,16 +708,63 @@ def export_markdown(
     return "\n".join(lines)
 
 
+def export_trend_markdown(scans: List[Dict]) -> str:
+    """导出趋势摘要为 Markdown"""
+    if len(scans) < 2:
+        return ""
+    lines = []
+    lines.append("## 📈 观察趋势摘要")
+    lines.append("")
+    lines.append("| # | 时间 | 样本量 | 负面率 | 情绪分 | 告警 | 问题组趋势 |")
+    lines.append("|---|------|--------|--------|--------|------|------------|")
+    for i, s in enumerate(scans, 1):
+        ts = datetime.fromtimestamp(s.get("scanned_at", 0)).strftime("%H:%M")
+        total = s.get("total_posts", 0)
+        neg = s.get("negative_posts", 0)
+        neg_pct = f"{neg/total*100:.1f}%" if total else "0%"
+        avg = s.get("avg_sentiment", 0)
+        alerts = s.get("alerts", [])
+        group_alerts = s.get("group_alerts", [])
+        alert_cnt = len(alerts) + len(group_alerts)
+        trends = []
+        for ga in group_alerts[:3]:
+            label = ga.get("label", "")
+            delta = ga.get("delta", 0)
+            arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+            trends.append(f"{label} {arrow}{delta}")
+        trend_str = ", ".join(trends) if trends else "-"
+        lines.append(f"| {i} | {ts} | {total} | {neg_pct} | {avg:.2f} | {alert_cnt} | {trend_str} |")
+    lines.append("")
+
+    # 简短总结
+    first = scans[0]
+    last = scans[-1]
+    t_first = first.get("total_posts", 0) or 1
+    t_last = last.get("total_posts", 0) or 1
+    pct_first = first.get("negative_posts", 0) / t_first * 100
+    pct_last = last.get("negative_posts", 0) / t_last * 100
+    neg_trend = "下降 ↓" if pct_last < pct_first else ("上升 ↑" if pct_last > pct_first else "持平 →")
+    lines.append(f"**趋势总结**: 负面率从 {pct_first:.1f}% → {pct_last:.1f}% ({neg_trend})，"
+                 f"样本量 {t_first} → {t_last}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def export_report_markdown(
     scans: List[Dict],
     title: str = "舆情巡检报告",
 ) -> str:
-    """导出多次巡检为 Markdown 报告（带趋势）"""
     lines = []
     lines.append(f"# {title}")
     lines.append("")
     lines.append(f"共 {len(scans)} 次巡检记录")
     lines.append("")
+
+    # 趋势摘要（如果有2+条记录）
+    if len(scans) >= 2:
+        reversed_scans = list(reversed(scans))
+        lines.append(export_trend_markdown(reversed_scans))
 
     # 概览表
     lines.append("## 巡检概览")
@@ -544,17 +779,18 @@ def export_report_markdown(
         total = s.get("total_posts", 0)
         neg = s.get("negative_posts", 0)
         neg_pct = f"{(neg/total*100):.1f}%" if total else "0%"
-        lines.append(f"| {i} | {ts} | {s.get('game', '')} | {src} | {s.get('time_range', '')} | {total} | {neg} | {neg_pct} |")
+        lines.append(f"| {i} | {ts} | {s.get('game', '')} | {src} | "
+                     f"{s.get('time_range', '')} | {total} | {neg} | {neg_pct} |")
     lines.append("")
 
     # 每次详情
     lines.append("## 各次详情")
     lines.append("")
     for idx, s in enumerate(scans, 1):
-        lines.append(f"### 第 {idx} 次 - {datetime.fromtimestamp(s.get('scanned_at',0)).strftime('%Y-%m-%d %H:%M')}")
+        lines.append(f"### 第 {idx} 次 - "
+                     f"{datetime.fromtimestamp(s.get('scanned_at',0)).strftime('%Y-%m-%d %H:%M')}")
         lines.append("")
-        prev = scans[idx] if idx < len(scans) else None
-        lines.append(export_markdown(s, prev))
+        lines.append(export_markdown(s))
         lines.append("---")
         lines.append("")
 
