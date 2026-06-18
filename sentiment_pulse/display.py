@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Dict, List, Optional
 
+import click
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
@@ -389,6 +390,8 @@ def render_watch_round_summary(
     scanned_at: int,
     result: Dict,
     previous_result: Dict = None,
+    source_statuses: Dict[str, Dict] = None,
+    health_warnings: List[str] = None,
 ):
     ts = datetime.fromtimestamp(scanned_at).strftime("%H:%M:%S")
     sent = result["sentiment"]
@@ -413,12 +416,53 @@ def render_watch_round_summary(
     if top_items:
         summary.add_row("", "  " + "  ".join(top_items))
 
+    # 来源状态一行摘要 + 健康提醒
+    if source_statuses:
+        src_parts = []
+        for src, st in sorted(source_statuses.items()):
+            if st.get("ok"):
+                c = st.get("count", 0)
+                tu = st.get("time_unknown_count", 0)
+                tu_str = f"[yellow]⚠tu{tu}[/yellow]" if tu > 0 else ""
+                zero_str = ""
+                if previous_result and previous_result.get("source_statuses"):
+                    prev_st = previous_result["source_statuses"].get(src, {})
+                    prev_c = prev_st.get("count", 0)
+                    if prev_c > 10 and c == 0:
+                        zero_str = f"[red]⚠归零[/red]"
+                src_parts.append(f"[{st['count']}] {tu_str}{zero_str}")
+            else:
+                src_parts.append(f"[red]✗[/red]")
+        if src_parts:
+            src_summary = "  ".join(src_parts)
+            src_names = "/".join(sorted(source_statuses.keys()))
+            summary.add_row("", f"[dim]来源({src_names}):[/dim] {src_summary}")
+
+    if health_warnings:
+        for w in health_warnings[:2]:
+            summary.add_row("", f"  {w}")
+
     console.print(Panel(summary, border_style="cyan", box=box.ROUNDED))
 
 
 def render_trend_summary(scans: List[Dict]):
-    """渲染观察模式的趋势摘要（最近N轮）"""
+    """渲染观察模式的趋势摘要（最近N轮）。任意轮次均不报错，<2 轮显示降级提示。"""
+    if not scans:
+        t = Text("📈 观察趋势摘要：本轮数据不足，多跑几轮后再来查看趋势",
+                 style="dim")
+        console.print(Panel(t, title="[bold]📈 观察趋势摘要[/bold]",
+                            border_style="magenta", box=box.ROUNDED))
+        return
     if len(scans) < 2:
+        s = scans[0]
+        total = s.get("total_posts", 0) or 1
+        neg = s.get("negative_posts", 0)
+        neg_pct = neg / total * 100
+        msg = (f"📈 观察趋势摘要：仅 1 轮，需 ≥2 轮才可对比。\n"
+               f"   当轮：样本 {total} 条 | 负面率 {neg_pct:.1f}% | 情绪分 {s.get('avg_sentiment', 0):.2f}")
+        t = Text(msg, style="dim")
+        console.print(Panel(t, title="[bold]📈 观察趋势摘要[/bold]",
+                            border_style="magenta", box=box.ROUNDED))
         return
 
     table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
@@ -431,11 +475,11 @@ def render_trend_summary(scans: List[Dict]):
     table.add_column("问题组趋势", style="dim")
 
     for s in scans:
-        ts = datetime.fromtimestamp(s["scanned_at"]).strftime("%H:%M")
+        ts = datetime.fromtimestamp(s.get("scanned_at", 0)).strftime("%H:%M")
         total = s.get("total_posts", 0)
         neg = s.get("negative_posts", 0)
         neg_pct = f"{neg/total*100:.1f}%" if total else "0%"
-        avg = s.get("avg_sentiment", 0)
+        avg = s.get("avg_sentiment", 0) or 0
         avg_str = f"{avg:.2f}"
         if avg < 0.35:
             avg_str = f"[red]{avg_str}[/red]"
@@ -460,7 +504,25 @@ def render_trend_summary(scans: List[Dict]):
 
         table.add_row(f"#{s.get('id', '?')}", ts, str(total), neg_pct, avg_str, alert_str, group_str)
 
-    console.print(Panel(table, title="[bold]📈 观察趋势摘要[/bold]", border_style="magenta", box=box.ROUNDED))
+    # 总结行
+    first = scans[0]
+    last = scans[-1]
+    t_first = first.get("total_posts", 0) or 1
+    t_last = last.get("total_posts", 0) or 1
+    pct_first = first.get("negative_posts", 0) / t_first * 100
+    pct_last = last.get("negative_posts", 0) / t_last * 100
+    neg_delta = pct_last - pct_first
+    sign = "+" if neg_delta >= 0 else ""
+    neg_trend = "下降 ↓" if pct_last < pct_first else ("上升 ↑" if pct_last > pct_first else "持平 →")
+
+    summary_txt = (
+        f"📌 总结：负面率 {pct_first:.1f}% → {pct_last:.1f}% ({sign}{neg_delta:.1f}% {neg_trend})  |  "
+        f"样本量 {t_first} → {t_last}"
+    )
+
+    inner = Group(table, Text(summary_txt, style="bold cyan"))
+    console.print(Panel(inner, title="[bold]📈 观察趋势摘要[/bold]",
+                        border_style="magenta", box=box.ROUNDED))
 
 
 def render_compare(scan_a: Dict, scan_b: Dict):
@@ -538,12 +600,80 @@ def render_compare(scan_a: Dict, scan_b: Dict):
         render_alerts(alerts_b)
         console.print()
 
-    # 链接对比：B的新增链接
-    links_a = {l["url"] for l in scan_a.get("top_links", [])}
-    links_b = scan_b.get("top_links", [])
-    new_links = [l for l in links_b if l["url"] not in links_a]
-    if new_links:
-        render_top_links(new_links)
+    # 链接对比：新增 / 消失 / 仍需关注 三类
+    links_a = {l["url"]: l for l in scan_a.get("top_links", [])}
+    links_b = {l["url"]: l for l in scan_b.get("top_links", [])}
+    urls_a = set(links_a.keys())
+    urls_b = set(links_b.keys())
+
+    new_urls = urls_b - urls_a
+    gone_urls = urls_a - urls_b
+    keep_urls = urls_a & urls_b
+
+    if new_urls:
+        new_links = [links_b[u] for u in sorted(new_urls)]
+        table = Table(show_header=False, box=box.ROUNDED, expand=True, show_lines=True)
+        table.add_column("#", width=3, justify="center", style="dim")
+        table.add_column("内容摘要", style="white")
+        table.add_column("来源", width=10, style="bold cyan")
+        table.add_column("链接", style="underline blue")
+        for i, l in enumerate(new_links, 1):
+            src = {
+                "steam": "[bold deep_sky_blue1]Steam[/bold deep_sky_blue1]",
+                "taptap": "[bold green]TapTap[/bold green]",
+                "bilibili": "[bold pink]B站[/bold pink]",
+                "tieba": "[bold blue]贴吧[/bold blue]",
+            }.get(l["source"].lower(), l["source"])
+            sentiment_color = "red" if l["sentiment"] < 0.35 else ("yellow" if l["sentiment"] < 0.65 else "green")
+            marker = {"red": "😡", "yellow": "😐", "green": "😊"}[sentiment_color]
+            table.add_row(str(i), f"{marker} {l['snippet']}", src, l["url"])
+        console.print(Panel(table,
+                            title=f"[bold green]🌱 新增链接 ({len(new_links)} 条)[/bold green]",
+                            border_style="green", box=box.ROUNDED))
+        console.print()
+
+    if keep_urls:
+        keep_links = [links_b[u] for u in sorted(keep_urls)]
+        table = Table(show_header=False, box=box.ROUNDED, expand=True, show_lines=True)
+        table.add_column("#", width=3, justify="center", style="dim")
+        table.add_column("内容摘要", style="white")
+        table.add_column("来源", width=10, style="bold cyan")
+        table.add_column("链接", style="underline blue")
+        for i, l in enumerate(keep_links, 1):
+            src = {
+                "steam": "[bold deep_sky_blue1]Steam[/bold deep_sky_blue1]",
+                "taptap": "[bold green]TapTap[/bold green]",
+                "bilibili": "[bold pink]B站[/bold pink]",
+                "tieba": "[bold blue]贴吧[/bold blue]",
+            }.get(l["source"].lower(), l["source"])
+            sentiment_color = "red" if l["sentiment"] < 0.35 else ("yellow" if l["sentiment"] < 0.65 else "green")
+            marker = {"red": "😡", "yellow": "😐", "green": "😊"}[sentiment_color]
+            table.add_row(str(i), f"{marker} {l['snippet']}", src, l["url"])
+        console.print(Panel(table,
+                            title=f"[bold yellow]🔔 仍需关注 ({len(keep_links)} 条，两次均在Top列表)[/bold yellow]",
+                            border_style="yellow", box=box.ROUNDED))
+        console.print()
+
+    if gone_urls:
+        gone_links = [links_a[u] for u in sorted(gone_urls)[:8]]
+        table = Table(show_header=False, box=box.ROUNDED, expand=True, show_lines=True)
+        table.add_column("#", width=3, justify="center", style="dim")
+        table.add_column("内容摘要", style="white")
+        table.add_column("来源", width=10, style="bold cyan")
+        table.add_column("链接", style="underline blue strike")
+        for i, l in enumerate(gone_links, 1):
+            src = {
+                "steam": "[bold deep_sky_blue1]Steam[/bold deep_sky_blue1]",
+                "taptap": "[bold green]TapTap[/bold green]",
+                "bilibili": "[bold pink]B站[/bold pink]",
+                "tieba": "[bold blue]贴吧[/bold blue]",
+            }.get(l["source"].lower(), l["source"])
+            sentiment_color = "red" if l["sentiment"] < 0.35 else ("yellow" if l["sentiment"] < 0.65 else "green")
+            marker = {"red": "😡", "yellow": "😐", "green": "😊"}[sentiment_color]
+            table.add_row(str(i), f"{marker} {l['snippet']}", src, l["url"])
+        console.print(Panel(table,
+                            title=f"[bold dim]✅ 已消失 ({len(gone_urls)} 条，不再出现在Top列表)[/bold dim]",
+                            border_style="dim", box=box.ROUNDED))
         console.print()
 
 
@@ -810,3 +940,233 @@ def render_info(msg: str):
 def render_success(msg: str):
     console.print(Panel(msg, title="[bold]✅ 完成[/bold]",
                         border_style="green", box=box.ROUNDED, style="bold green"))
+
+
+# ============ 观察会话渲染 ============
+
+def render_watch_sessions(sessions: List[Dict]):
+    """渲染会话列表"""
+    if not sessions:
+        display.render_info("暂无观察会话记录，使用 'scan --watch' 开始一轮观察")
+        return
+
+    table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
+    table.add_column("ID", width=6, justify="center", style="dim")
+    table.add_column("开始时间", width=16)
+    table.add_column("结束时间", width=16)
+    table.add_column("游戏", style="bold yellow")
+    table.add_column("来源")
+    table.add_column("窗口", width=6)
+    table.add_column("间隔", width=8, justify="right")
+    table.add_column("轮次", justify="right", width=6)
+    table.add_column("状态", width=6, justify="center")
+
+    for s in sessions:
+        start_ts = datetime.fromtimestamp(s["started_at"]).strftime("%m-%d %H:%M")
+        if s.get("ended_at"):
+            end_ts = datetime.fromtimestamp(s["ended_at"]).strftime("%m-%d %H:%M")
+            status = Text("完成", style="green")
+        else:
+            end_ts = Text("进行中", style="bold red")
+            status = Text("运行中", style="bold red")
+        src = ", ".join(s["sources"])
+        if len(src) > 18:
+            src = src[:16] + "…"
+        interval = f"{s['interval_seconds']}s"
+        table.add_row(str(s["id"]), start_ts, end_ts, s["game"], src,
+                      s["time_range"], interval, str(s["rounds"]), status)
+
+    console.print(Panel(table, title="[bold]📺 观察会话列表[/bold]",
+                        border_style="magenta", box=box.ROUNDED))
+    click.secho("💡 查看会话详情: pulse history session <id>   |   导出: pulse history export --session <id> -o session.md",
+                dim=True)
+
+
+def render_watch_session_detail(session: Dict, scan_details: List[Dict]):
+    """渲染单个会话的完整详情（含趋势+每轮概览）"""
+    # 表头
+    start_ts = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M:%S")
+    if session.get("ended_at"):
+        end_ts = datetime.fromtimestamp(session["ended_at"]).strftime("%Y-%m-%d %H:%M:%S")
+        duration_sec = session["ended_at"] - session["started_at"]
+        h, rem = divmod(duration_sec, 3600)
+        m, _ = divmod(rem, 60)
+        duration_str = f"{h}h{m:02d}m"
+    else:
+        end_ts = "进行中"
+        duration_str = "N/A"
+
+    header_grid = Table.grid(expand=True, padding=(0, 2))
+    header_grid.add_column(style="bold cyan")
+    header_grid.add_column()
+    header_grid.add_row(f"📺 会话 #{session['id']}", f"[bold yellow]{session['game']}[/bold yellow]")
+    header_grid.add_row("开始 / 结束", f"{start_ts}  →  {end_ts}")
+    header_grid.add_row("来源 / 窗口",
+                        f"{', '.join(session['sources'])}  |  {session['time_range']}")
+    header_grid.add_row("间隔 / 轮次",
+                        f"{session['interval_seconds']}s  |  共 {session['rounds']} 轮  |  "
+                        f"总时长 {duration_str}")
+    if session.get("notes"):
+        header_grid.add_row("备注", session["notes"])
+    console.print(Panel(header_grid, title="[bold]📺 观察会话详情[/bold]",
+                        border_style="magenta", box=box.ROUNDED))
+    console.print()
+
+    # 趋势摘要
+    render_trend_summary(scan_details)
+    console.print()
+
+    # 每轮概览
+    if scan_details:
+        table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
+        table.add_column("轮", width=4, justify="center")
+        table.add_column("扫描ID", width=8, justify="center", style="dim")
+        table.add_column("时间", width=10)
+        table.add_column("样本", justify="right")
+        table.add_column("负面率", justify="right")
+        table.add_column("情绪", justify="right")
+        table.add_column("告警", justify="center")
+        for idx, s in enumerate(scan_details, 1):
+            ts = datetime.fromtimestamp(s["scanned_at"]).strftime("%H:%M")
+            total = s.get("total_posts", 0) or 1
+            neg = s.get("negative_posts", 0)
+            neg_pct = f"{neg/total*100:.1f}%"
+            avg = s.get("avg_sentiment", 0) or 0
+            avg_str = f"{avg:.2f}"
+            if avg < 0.35:
+                avg_str = f"[red]{avg_str}[/red]"
+            elif avg < 0.65:
+                avg_str = f"[yellow]{avg_str}[/yellow]"
+            alert_cnt = len(s.get("alerts", [])) + len(s.get("group_alerts", []))
+            alert_str = f"[red]{alert_cnt}[/red]" if alert_cnt > 0 else "[green]0[/green]"
+            table.add_row(str(idx), f"#{s['id']}", ts, str(total), neg_pct, avg_str, alert_str)
+        console.print(Panel(table, title="[bold]每轮概览[/bold]",
+                            border_style="cyan", box=box.ROUNDED))
+
+
+def export_session_markdown(session: Dict, scan_details: List[Dict]) -> str:
+    """导出某次会话完整报告为 Markdown"""
+    lines = []
+    game = session["game"]
+    start_ts = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M:%S")
+    if session.get("ended_at"):
+        end_ts = datetime.fromtimestamp(session["ended_at"]).strftime("%Y-%m-%d %H:%M:%S")
+        duration = session["ended_at"] - session["started_at"]
+        h, rem = divmod(duration, 3600)
+        m, _ = divmod(rem, 60)
+        duration_str = f"{h}h{m:02d}m"
+    else:
+        end_ts = "进行中"
+        duration_str = "N/A"
+
+    lines.append(f"# 观察会话复盘 #{session['id']} - {game}")
+    lines.append("")
+    lines.append(f"- **会话ID**: {session['id']}")
+    lines.append(f"- **游戏**: {game}")
+    lines.append(f"- **来源**: {', '.join(session['sources'])}")
+    lines.append(f"- **时间窗口**: {session['time_range']}")
+    lines.append(f"- **开始时间**: {start_ts}")
+    lines.append(f"- **结束时间**: {end_ts}")
+    lines.append(f"- **总时长**: {duration_str}")
+    lines.append(f"- **轮询间隔**: {session['interval_seconds']} 秒")
+    lines.append(f"- **完成轮次**: {session['rounds']} 轮")
+    if session.get("notes"):
+        lines.append(f"- **备注**: {session['notes']}")
+    lines.append("")
+
+    # 趋势摘要
+    if len(scan_details) >= 2:
+        lines.append(export_trend_markdown(scan_details))
+
+    # 每轮概览表
+    if scan_details:
+        lines.append("## 每轮概览")
+        lines.append("")
+        lines.append("| 轮次 | 扫描ID | 时间 | 样本量 | 负面率 | 情绪分 | 告警数 |")
+        lines.append("|------|--------|------|--------|--------|--------|--------|")
+        for idx, s in enumerate(scan_details, 1):
+            ts = datetime.fromtimestamp(s["scanned_at"]).strftime("%H:%M")
+            total = s.get("total_posts", 0) or 1
+            neg = s.get("negative_posts", 0)
+            alert_cnt = len(s.get("alerts", [])) + len(s.get("group_alerts", []))
+            lines.append(
+                f"| {idx} | #{s['id']} | {ts} | {total} | "
+                f"{neg/total*100:.1f}% | {s.get('avg_sentiment',0):.2f} | {alert_cnt} |"
+            )
+        lines.append("")
+
+    # 每轮详情
+    lines.append("## 各轮详情")
+    lines.append("")
+    for idx, s in enumerate(scan_details, 1):
+        ts = datetime.fromtimestamp(s["scanned_at"]).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"### 第 {idx} 轮 #{s['id']} - {ts}")
+        lines.append("")
+        lines.append(export_markdown(s).replace("# 舆情巡检报告", "#### 报告详情"))
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def export_compare_markdown(scan_a: Dict, scan_b: Dict) -> str:
+    """导出 compare 结果为 Markdown"""
+    ts_a = datetime.fromtimestamp(scan_a["scanned_at"]).strftime("%Y-%m-%d %H:%M")
+    ts_b = datetime.fromtimestamp(scan_b["scanned_at"]).strftime("%Y-%m-%d %H:%M")
+
+    lines = []
+    lines.append(f"# 对比报告 - {scan_a.get('game', '')}  A(#{scan_a['id']}) vs B(#{scan_b['id']})")
+    lines.append("")
+    lines.append(f"- **A (旧)**: #{scan_a['id']}  {ts_a}  窗口 {scan_a.get('time_range', '')}")
+    lines.append(f"- **B (新)**: #{scan_b['id']}  {ts_b}  窗口 {scan_b.get('time_range', '')}")
+    lines.append("")
+
+    # 对比概览
+    lines.append("## 📊 对比概览")
+    lines.append("")
+    t_a = scan_a.get("total_posts", 0) or 1
+    t_b = scan_b.get("total_posts", 0) or 1
+    pct_a = scan_a.get("negative_posts", 0) / t_a * 100
+    pct_b = scan_b.get("negative_posts", 0) / t_b * 100
+    delta_pct = pct_b - pct_a
+    lines.append(f"| 指标 | A | B | 变化 |")
+    lines.append(f"|------|---|---|------|")
+    lines.append(f"| 样本量 | {t_a} | {t_b} | {_delta_str(t_b - t_a)} |")
+    lines.append(f"| 负面率 | {pct_a:.1f}% | {pct_b:.1f}% | {'+' if delta_pct >= 0 else ''}{delta_pct:.1f}% |")
+    lines.append(f"| 平均情绪 | {scan_a.get('avg_sentiment',0):.2f} | {scan_b.get('avg_sentiment',0):.2f} | "
+                 f"{scan_b.get('avg_sentiment',0) - scan_a.get('avg_sentiment',0):+.2f} |")
+    lines.append("")
+
+    # 链接分类
+    links_a = {l["url"]: l for l in scan_a.get("top_links", [])}
+    links_b = {l["url"]: l for l in scan_b.get("top_links", [])}
+    urls_a = set(links_a.keys())
+    urls_b = set(links_b.keys())
+    new_urls = urls_b - urls_a
+    keep_urls = urls_a & urls_b
+    gone_urls = urls_a - urls_b
+
+    if new_urls:
+        lines.append(f"## 🌱 新增链接 ({len(new_urls)} 条)")
+        lines.append("")
+        for u in sorted(new_urls):
+            l = links_b[u]
+            lines.append(f"- [{l.get('snippet','')}]({u}) _({l.get('source','')})_")
+        lines.append("")
+    if keep_urls:
+        lines.append(f"## 🔔 仍需关注 ({len(keep_urls)} 条)")
+        lines.append("")
+        for u in sorted(keep_urls):
+            l = links_b[u]
+            lines.append(f"- [{l.get('snippet','')}]({u}) _({l.get('source','')})_")
+        lines.append("")
+    if gone_urls:
+        lines.append(f"## ✅ 已消失 ({len(gone_urls)} 条)")
+        lines.append("")
+        for u in sorted(gone_urls):
+            l = links_a[u]
+            lines.append(f"- [{l.get('snippet','')}]({u}) _({l.get('source','')})_")
+        lines.append("")
+
+    return "\n".join(lines)
+

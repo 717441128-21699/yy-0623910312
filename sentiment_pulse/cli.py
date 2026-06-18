@@ -38,8 +38,15 @@ def _get_recent_scan_details(game, sources_list, time_range, limit=3):
     return details
 
 
+def _get_session_context(session_id):
+    """取某会话前2轮的扫描详情，用于来源健康对比"""
+    scans = storage.list_session_scans(session_id)
+    return scans[-2:] if len(scans) >= 2 else scans
+
+
 def _do_single_scan(game, sources_list, time_range, per_source_limit, no_save,
-                    watch_mode=False, round_idx=None):
+                    watch_mode=False, round_idx=None, session_id=None,
+                    recent_details_for_health=None):
     try:
         posts, statuses = source_module.fetch_all(game, sources_list, time_range,
                                                     per_source_limit=per_source_limit)
@@ -47,16 +54,35 @@ def _do_single_scan(game, sources_list, time_range, per_source_limit, no_save,
         display.render_error(f"数据获取失败: {e}")
         return None, False
 
-    if round_idx is None:
+    health_warnings = []
+    if recent_details_for_health is None:
         recent_details = _get_recent_scan_details(game, sources_list, time_range, limit=3)
-        health_warnings = display.detect_source_health(statuses, recent_details)
+    else:
+        recent_details = recent_details_for_health
+    health_warnings = display.detect_source_health(statuses, recent_details)
+
+    if round_idx is None:
+        # 完整输出：来源状态 + 健康提醒
         display.render_source_statuses(statuses, health_warnings=health_warnings)
 
     ok_sources = [n for n, s in statuses.items() if s.get("ok") and s.get("count", 0) > 0]
 
     if not posts:
         if round_idx is not None:
-            click.secho(f"  [#{round_idx:02d}] 窗口内无有效帖子", fg="yellow")
+            # 摘要模式也要给简短提醒
+            sent = {"total": 0, "negative": 0, "avg_sentiment": 0.0}
+            empty_result = {
+                "sentiment": sent, "alerts": [], "group_alerts": [],
+                "top_keywords": [], "negative_snippets": [], "top_links": [],
+                "keyword_freq": {}, "_statuses": statuses,
+                "_scanned_at": int(time.time()), "_previous": None,
+                "_source_statuses": statuses,
+            }
+            display.render_watch_round_summary(
+                round_idx, empty_result["_scanned_at"], empty_result,
+                previous_result=None, source_statuses=statuses,
+                health_warnings=health_warnings + ["🟡 窗口内无有效帖子"],
+            )
         else:
             display.render_error(
                 f"指定时间窗口内没有帖子（窗口={time_range}）。"
@@ -93,6 +119,7 @@ def _do_single_scan(game, sources_list, time_range, per_source_limit, no_save,
             source_statuses=statuses,
             group_alerts=result["group_alerts"],
             watch_mode=watch_mode,
+            session_id=session_id,
         )
         try:
             storage.save_cached_posts(game, posts)
@@ -100,8 +127,11 @@ def _do_single_scan(game, sources_list, time_range, per_source_limit, no_save,
             pass
 
     result["_statuses"] = statuses
+    result["_source_statuses"] = statuses
     result["_scanned_at"] = scanned_at
     result["_previous"] = previous
+    result["_health_warnings"] = health_warnings
+    result["_previous_summary"] = previous_summary
     return result, True
 
 
@@ -138,12 +168,8 @@ def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
         if not ok or result is None:
             sys.exit(0 if result is not None else 1)
 
-        previous_summary = None
-        if result.get("_previous"):
-            p = result["_previous"]
-            previous_summary = {"total": p["total_posts"], "negative": p["negative_posts"]}
         display.render_result(result, game, sources_list, time_range,
-                              result["_scanned_at"], previous_summary)
+                              result["_scanned_at"], result.get("_previous_summary"))
 
         if result.get("_previous"):
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(result["_previous"]["scanned_at"]))
@@ -165,9 +191,12 @@ def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
         signal.signal(signal.SIGINT, _handle_signal)
         signal.signal(signal.SIGTERM, _handle_signal)
 
+    # 创建观察会话
+    session_id = storage.start_watch_session(game, sources_list, time_range, interval)
     display.render_info(
-        f"🚀 进入观察模式  |  游戏: [bold yellow]{game}[/bold yellow]  "
-        f"来源: [bold cyan]{', '.join(sources_list)}[/bold cyan]  "
+        f"🚀 进入观察模式  |  会话ID: [bold magenta]#{session_id}[/bold magenta]\n"
+        f"   游戏: [bold yellow]{game}[/bold yellow]  |  "
+        f"来源: [bold cyan]{', '.join(sources_list)}[/bold cyan]  |  "
         f"窗口: [bold]{time_range}[/bold]\n"
         f"   每 [bold]{interval}[/bold] 秒扫描一轮  |  按 Ctrl+C 停止"
     )
@@ -177,36 +206,42 @@ def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
     try:
         while _watch_running:
             round_idx += 1
+            session_context = _get_session_context(session_id)
 
             if round_idx == 1:
                 display.render_info(f"🔄 第 {round_idx} 轮扫描 (完整输出)...")
                 result, ok = _do_single_scan(
                     game, sources_list, time_range, limit, no_save,
-                    watch_mode=True, round_idx=None
+                    watch_mode=True, round_idx=None, session_id=session_id,
+                    recent_details_for_health=session_context,
                 )
                 if ok and result is not None:
-                    previous_summary = None
-                    if result.get("_previous"):
-                        p = result["_previous"]
-                        previous_summary = {"total": p["total_posts"], "negative": p["negative_posts"]}
                     display.render_result(result, game, sources_list, time_range,
-                                          result["_scanned_at"], previous_summary,
+                                          result["_scanned_at"], result.get("_previous_summary"),
                                           round_idx=round_idx)
                     click.echo()
-                    click.secho(f"   💡 下一轮: {time.strftime('%H:%M:%S', time.localtime(time.time() + interval))}",
-                                dim=True)
+                    click.secho(
+                        f"   💡 下一轮: {time.strftime('%H:%M:%S', time.localtime(time.time() + interval))}",
+                        dim=True,
+                    )
             else:
                 result, ok = _do_single_scan(
                     game, sources_list, time_range, limit, no_save,
-                    watch_mode=True, round_idx=round_idx
+                    watch_mode=True, round_idx=round_idx, session_id=session_id,
+                    recent_details_for_health=session_context,
                 )
                 if ok and result is not None:
+                    prev_detail = session_context[-1] if session_context else None
                     display.render_watch_round_summary(
                         round_idx, result["_scanned_at"], result,
-                        result.get("_previous")
+                        previous_result=prev_detail,
+                        source_statuses=result.get("_source_statuses"),
+                        health_warnings=result.get("_health_warnings"),
                     )
-                    click.secho(f"   下一轮: {time.strftime('%H:%M:%S', time.localtime(time.time() + interval))}",
-                                dim=True)
+                    click.secho(
+                        f"   下一轮: {time.strftime('%H:%M:%S', time.localtime(time.time() + interval))}",
+                        dim=True,
+                    )
 
             if not _watch_running:
                 break
@@ -221,20 +256,22 @@ def scan(game, sources, time_range, limit, no_save, watch_mode, interval):
     except KeyboardInterrupt:
         pass
 
+    # 结束观察会话
+    storage.end_watch_session(session_id, rounds=round_idx)
     click.echo()
 
-    # 观察模式结束后显示趋势摘要
-    if round_idx >= 2:
-        recent_details = _get_recent_scan_details(game, sources_list, time_range, limit=round_idx)
-        if len(recent_details) >= 2:
-            display.render_trend_summary(reversed(recent_details))
-            click.echo()
+    # 趋势摘要（任何轮次都不报错）
+    session_scans = storage.list_session_scans(session_id)
+    display.render_trend_summary(session_scans)
+    click.echo()
 
     display.render_success(
-        f"✅ 观察模式结束  |  共运行 [bold]{round_idx}[/bold] 轮  |  "
-        f"游戏: [bold yellow]{game}[/bold yellow]  |  窗口: [bold]{time_range}[/bold]\n"
-        f"   使用 'history -g \"{game}\"' 查看所有历史记录\n"
-        f"   使用 'history compare <id1> <id2>' 对比任意两次巡检"
+        f"✅ 观察模式结束  |  会话ID: [bold magenta]#{session_id}[/bold magenta]  |  "
+        f"共运行 [bold]{round_idx}[/bold] 轮\n"
+        f"   游戏: [bold yellow]{game}[/bold yellow]  |  窗口: [bold]{time_range}[/bold]\n"
+        f"   💡 查看会话详情: pulse history session {session_id}\n"
+        f"   💡 导出复盘报告: pulse history export --session {session_id} -o session_{session_id}.md\n"
+        f"   💡 补丁前后对比: pulse history compare <id1> <id2>"
     )
 
 
@@ -352,7 +389,7 @@ def synonyms_remove(label):
         display.render_error(f"未找到同义词组: '{label}'")
 
 
-@cli.group(help="📋 历史巡检记录（可筛选、对比、查看详情、导出Markdown）", invoke_without_command=True)
+@cli.group(help="📋 历史巡检记录（筛选/对比/会话/导出）", invoke_without_command=True)
 @click.option("-g", "--game", help="按游戏名过滤")
 @click.option("-s", "--source", "sources", multiple=True,
               type=click.Choice(DEFAULT_SOURCES),
@@ -384,6 +421,7 @@ def history(ctx, game, sources, time_range, limit):
     table.add_column("窗口", width=8)
     table.add_column("样本", justify="right")
     table.add_column("负面", justify="right", style="red")
+    table.add_column("会话", width=8, justify="center")
     table.add_column("模式", width=8, justify="center")
 
     for s in scans:
@@ -395,8 +433,11 @@ def history(ctx, game, sources, time_range, limit):
         tot = s.get("total_posts", 1) or 1
         neg_pct = f"{neg} ({neg/tot*100:.0f}%)"
         mode = "👁 观察" if s.get("watch_mode") else "单次"
+        session_str = f"#{s['session_id']}" if s.get("session_id") else "-"
+        if s.get("session_id"):
+            session_str = f"[bold magenta]{session_str}[/bold magenta]"
         table.add_row(str(s["id"]), ts, s["game"], src, s["time_range"],
-                      str(tot), neg_pct, mode)
+                      str(tot), neg_pct, session_str, mode)
 
     filter_info = []
     if game:
@@ -411,8 +452,13 @@ def history(ctx, game, sources, time_range, limit):
     if subtitle:
         panel_title += f"\n{subtitle}"
     display.console.print(Panel(table, title=panel_title, border_style="cyan", box=box.ROUNDED))
-    click.secho("💡 查看详情: pulse history show <id>   |   对比: pulse history compare <id1> <id2>   |   导出: pulse history export -o report.md",
-                dim=True)
+    click.secho(
+        "💡 详情: pulse history show <id>   |   "
+        "会话: pulse history sessions / session <id>   |   "
+        "对比: pulse history compare <id1> <id2>   |   "
+        "导出: pulse history export",
+        dim=True,
+    )
 
 
 @history.command(name="show", help="展开显示某次巡检的完整详情")
@@ -425,10 +471,12 @@ def history_show(scan_id):
     display.render_scan_detail(scan)
 
 
-@history.command(name="compare", help="对比两次巡检的差异（补丁前后看变化）")
+@history.command(name="compare", help="对比两次巡检（补丁前后看差异）")
 @click.argument("scan_id_a", type=int)
 @click.argument("scan_id_b", type=int)
-def history_compare(scan_id_a, scan_id_b):
+@click.option("-o", "--output", "output", default=None,
+              help="同时导出 Markdown 报告到指定文件")
+def history_compare(scan_id_a, scan_id_b, output):
     scan_a = storage.get_scan_by_id(scan_id_a)
     scan_b = storage.get_scan_by_id(scan_id_b)
     if not scan_a:
@@ -443,20 +491,73 @@ def history_compare(scan_id_a, scan_id_b):
 
     display.render_compare(scan_a, scan_b)
 
+    if output:
+        md = display.export_compare_markdown(scan_a, scan_b)
+        try:
+            with open(output, "w", encoding="utf-8") as f:
+                f.write(md)
+            display.render_success(f"对比报告已导出到 [bold]{output}[/bold] ({len(md)} 字)")
+        except Exception as e:
+            display.render_error(f"导出失败: {e}")
 
-@history.command(name="export", help="导出筛选后的历史记录为 Markdown 报告")
+
+@history.command(name="sessions", help="列出观察会话（每次 scan --watch 算一个会话）")
+@click.option("-n", "--limit", default=10, show_default=True, type=int, help="显示最近N个")
+@click.option("-g", "--game", help="按游戏过滤")
+def history_sessions(limit, game):
+    sessions = storage.list_watch_sessions(limit=limit, game=game)
+    display.render_watch_sessions(sessions)
+
+
+@history.command(name="session", help="展开显示某次观察会话的完整复盘")
+@click.argument("session_id", type=int)
+def history_session(session_id):
+    session = storage.get_watch_session(session_id)
+    if not session:
+        display.render_error(f"未找到会话 #{session_id}")
+        sys.exit(1)
+    scan_details = storage.list_session_scans(session_id)
+    display.render_watch_session_detail(session, scan_details)
+
+
+@history.command(name="export", help="导出历史记录/会话/对比为 Markdown 报告")
 @click.option("-o", "--output", "output", default="pulse_report.md", show_default=True,
               help="输出文件路径")
 @click.option("-g", "--game", help="按游戏名过滤")
 @click.option("-s", "--source", "sources", multiple=True,
               type=click.Choice(DEFAULT_SOURCES),
-              help="按来源过滤（需完整匹配所选来源集合）")
+              help="按来源过滤")
 @click.option("-t", "--time-range", "time_range",
               type=click.Choice(DEFAULT_TIME_RANGES),
               help="按时间窗口过滤")
 @click.option("-n", "--limit", default=10, show_default=True, type=int, help="包含最近N条")
+@click.option("--session", "session_id", type=int, default=None,
+              help="只导出某次观察会话的复盘（会忽略其他筛选）")
 @click.option("--title", default="舆情巡检报告", help="报告标题")
-def history_export(output, game, sources, time_range, limit, title):
+def history_export(output, game, sources, time_range, limit, session_id, title):
+    # 优先按会话导出
+    if session_id:
+        session = storage.get_watch_session(session_id)
+        if not session:
+            display.render_error(f"未找到会话 #{session_id}")
+            sys.exit(1)
+        scan_details = storage.list_session_scans(session_id)
+        if not scan_details:
+            display.render_error(f"会话 #{session_id} 没有扫描记录")
+            sys.exit(1)
+        md = display.export_session_markdown(session, scan_details)
+        try:
+            with open(output, "w", encoding="utf-8") as f:
+                f.write(md)
+            display.render_success(
+                f"已导出会话 #{session_id} 到 [bold]{output}[/bold]\n"
+                f"   轮次: {session['rounds']}  |  总字数: {len(md)}"
+            )
+        except Exception as e:
+            display.render_error(f"导出失败: {e}")
+            sys.exit(1)
+        return
+
     sources_list = sorted(set(sources)) if sources else None
     scans = storage.list_scans(game=game, sources=sources_list, time_range=time_range, limit=limit)
     if not scans:
@@ -515,6 +616,8 @@ def info():
         table.add_row("历史巡检次数", str(cur.fetchone()["c"]))
         cur = conn.execute("SELECT COUNT(*) as c FROM scans WHERE watch_mode = 1")
         table.add_row("观察模式轮次", str(cur.fetchone()["c"]))
+        cur = conn.execute("SELECT COUNT(*) as c FROM watch_sessions")
+        table.add_row("观察会话数", str(cur.fetchone()["c"]))
         cur = conn.execute("SELECT COUNT(*) as c FROM cached_posts")
         table.add_row("缓存帖子数", str(cur.fetchone()["c"]))
 
