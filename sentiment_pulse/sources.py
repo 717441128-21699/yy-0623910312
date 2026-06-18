@@ -1,8 +1,23 @@
-import random
+import re
 import time
-import hashlib
-from typing import List, Dict
+import random
+from typing import List, Dict, Optional, Tuple
 from abc import ABC, abstractmethod
+
+import requests
+from bs4 import BeautifulSoup
+
+
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+_TIMEOUT = 12
+
+
+class SourceUnavailableError(Exception):
+    pass
 
 
 class BaseSource(ABC):
@@ -12,194 +27,536 @@ class BaseSource(ABC):
     def fetch(self, game: str, time_range: str, limit: int = 200) -> List[Dict]:
         pass
 
-
-_MOCK_STEAM_REVIEWS = [
-    ("好评如潮，但更新后开始闪退了，每次进去不到5分钟就闪退到桌面，求修复！", 0.1),
-    ("玩了200小时，昨天更新完频繁闪退，心态炸了。", 0.0),
-    ("闪退+1，第三次了，存档还在就好，不然要退款了。", 0.05),
-    ("游戏本身很棒，就是偶尔闪退，希望下次补丁解决。", 0.4),
-    ("闪退闪退闪退！重要的事说三遍，根本没法玩。", 0.0),
-    ("没有闪退，运行很稳定，帧数也足。", 0.9),
-    ("存档消失了！我辛辛苦苦打了一周的进度没了，掉档了啊！", 0.0),
-    ("昨晚突然掉档，重新进只剩新手教程，心态崩了。", 0.0),
-    ("掉档警告，建议大家手动备份存档，自动保存有bug。", 0.1),
-    ("还好我有备份，不然就真的掉档了，这个bug太致命。", 0.15),
-    ("游戏剧情很好，就是优化有点差，偶尔卡顿。", 0.5),
-    ("卡顿严重，战斗场景掉帧到20以下，根本没法打。", 0.1),
-    ("不卡顿，全高画质60帧稳定，好评。", 0.95),
-    ("服务器炸了，连不上，匹配半小时进不去。", 0.0),
-    ("匹配机制有问题，新人被老玩家虐惨了。", 0.2),
-    ("服务器维护了一下午，连个公告都没有，差评。", 0.0),
-    ("退款了，实在玩不下去，与预期不符。", 0.0),
-    ("已申请退款，不值这个价，内容太少。", 0.0),
-    ("本来想退款，玩了几小时后发现还不错，留下了。", 0.7),
-    ("bug太多，再这样我就要退款了。", 0.1),
-    ("美术风格很喜欢，音乐也不错，沉浸感强。", 0.9),
-    ("剧情反转太惊艳了，年度最佳独立游戏预定。", 1.0),
-    ("操作手感有点怪，需要时间适应。", 0.6),
-    ("新手教程做的很好，不用担心不会玩。", 0.85),
-    ("建议加个中文语音，目前只有字幕。", 0.7),
-    ("翻译质量很好，没有机翻痕迹。", 0.9),
-    ("BOSS战设计很有创意，每一场都不一样。", 0.85),
-    ("最后一关太难了，卡了3天，求削弱。", 0.4),
-    ("难度适中，有挑战但不劝退，正好。", 0.8),
-    ("外挂多的要死，PVP根本没法玩，全是锁头。", 0.0),
-    ("举报了好几个外挂，都没处理，失望。", 0.05),
-    ("反外挂系统形同虚设，建议学学隔壁。", 0.1),
-    ("没遇到外挂，可能我段位低？", 0.7),
-    ("封号了！我什么都没做啊，无辜躺枪。", 0.0),
-    ("误封申诉三天没回复，客服死了？", 0.0),
-    ("充值不到账，找客服也没人理，垃圾。", 0.0),
-    ("内购太坑，不充钱根本玩不下去。", 0.1),
-    ("付费DLC还不错，值这个价。", 0.75),
-    ("黑屏！游戏启动后直接黑屏，有声音没画面。", 0.0),
-    ("开局黑屏，切后台再回来就好了，玄学。", 0.3),
-    ("报错弹窗，点确定就退出，玩不了。", 0.0),
-    ("运行库装了N遍，还是报错启动失败。", 0.0),
-    ("希望多出点mod，这个游戏很适合扩展。", 0.8),
-    ("创意工坊的mod质量都很高，社区活跃。", 0.9),
-    ("地图太小了，希望后续能更新更多内容。", 0.5),
-    ("通关只用了10小时，流程太短，期待DLC。", 0.6),
-    ("重复可玩性很高，每个职业体验都不一样。", 0.85),
-    ("音效细节满分，戴上耳机体验拉满。", 0.95),
-]
-
-_MOCK_TAPTAP = [
-    ("闪退严重，小米13Ultra一进就退，难受。", 0.0),
-    ("游戏不错，就是发热有点严重，冬天可以当暖手宝。", 0.5),
-    ("掉档了啊啊啊，我玩了三天的进度，TapTap云存档也没了？", 0.0),
-    ("已退款，优化太差，骁龙8gen2都卡。", 0.0),
-    ("手感比预期好，操作挺跟手的，好评。", 0.9),
-    ("充值了648，钻石没到账，客服联系不上。", 0.0),
-    ("匹配不到人，排位等了10分钟，人都麻了。", 0.1),
-    ("服务器是不是在维护？一直显示网络错误。", 0.05),
-    ("闪退问题终于修复了，更新后稳定了。", 0.85),
-    ("bug反馈了一周没人理，官方装死？", 0.1),
-    ("美术真的绝，每一张截图都是壁纸。", 1.0),
-    ("剧情太感人了，结局直接泪目。", 0.9),
-    ("卡顿，手机烫的可以煎鸡蛋，求优化。", 0.15),
-    ("黑屏，卡在启动界面不动，重启也没用。", 0.0),
-    ("游戏很好，但是广告太多了，到处都是弹窗。", 0.3),
-    ("体力值系统太恶心了，不买体力根本玩不了几分钟。", 0.2),
-    ("抽卡概率太坑，100抽保底才出，非酋哭了。", 0.25),
-    ("首充福利还不错，新手引导做得很用心。", 0.7),
-    ("外挂太多了，竞技场全是科技与狠活。", 0.05),
-    ("官方能不能管管外挂？打PVP被虐惨了。", 0.1),
-    ("存档没了！更新后自动清空了本地存档？", 0.0),
-    ("报错代码502，什么意思，能玩吗？", 0.05),
-    ("建议加个手柄支持，触屏操作太累。", 0.6),
-    ("和朋友联机很顺畅，没有延迟，体验很好。", 0.9),
-    ("角色平衡性太差，某几个角色太强了，其他没法玩。", 0.35),
-]
-
-_MOCK_BILIBILI = [
-    ("新出的补丁又搞崩了？弹幕全在刷闪退。", 0.1),
-    ("这个游戏剧情解说，第十五分钟高能预警！", 0.85),
-    ("【攻略】教你如何避免掉档，亲测有效。", 0.9),
-    ("直播录像：挑战无伤通关BOSS，结果闪退了（笑）", 0.5),
-    ("退款吐槽：花了钱买罪受，这游戏也太坑了。", 0.0),
-    ("独立游戏黑马！这个月最值得玩的新游。", 0.95),
-    ("服务器崩了？直播间连不上游戏，观众都在笑。", 0.2),
-    ("深度评测：为什么我说这款游戏值9分", 0.8),
-    ("外挂实锤！这个UP主用外挂还敢发视频？", 0.05),
-    ("全结局收集攻略，包含隐藏结局，附存档位置", 0.9),
-    ("卡顿优化教程，几步设置让你的游戏丝滑流畅", 0.85),
-    ("新手必看，避免前期踩坑的10个技巧", 0.8),
-    ("吐槽一下匹配机制，我白银怎么排到王者了？", 0.3),
-    ("这游戏也太难了吧，被虐到想退款了。", 0.4),
-    ("【MOD推荐】这5个MOD让游戏体验提升100%", 0.9),
-    ("付费DLC值不值得买？看完这个视频你就知道了", 0.7),
-    ("主播开挂被封号，现场光速变脸", 0.15),
-    ("黑屏问题解决方法，亲测有效", 0.8),
-    ("报错解决方案汇总，常见问题都在这里", 0.75),
-    ("掉档了，心态崩了，直播现场破防", 0.0),
-]
-
-_MOCK_TIEBA = [
-    ("兄弟们，今天更新后闪退频率变高了，有人一样吗？", 0.15),
-    ("楼主我找到闪退的临时解决办法了，把画质调低。", 0.5),
-    ("求助！掉档了，有办法恢复吗？很急！", 0.05),
-    ("有没有退款成功的？能不能教下怎么操作。", 0.1),
-    ("这游戏优化是真的烂，我3080都卡顿。", 0.15),
-    ("服务器崩了吧，吧里全是进不去的帖子。", 0.1),
-    ("匹配机制能不能改改，把把都是猪队友。", 0.25),
-    ("挂壁又出来了，这ID大家避雷一下。", 0.1),
-    ("官方贴吧，BUG反馈专用楼，集中发在这里。", 0.6),
-    ("求大佬分享个全收集存档，孩子打不过去了。", 0.5),
-    ("黑屏+1，而且还关不掉，只能强杀进程。", 0.0),
-    ("有没有遇到报错的，错误码E-1003是什么鬼？", 0.1),
-    ("新DLC体验，这次的剧情是真的短。", 0.55),
-    ("美术组是神吧，这场景设计的也太好看了。", 0.95),
-    ("建议降低一下难度，手残党真的过不去啊。", 0.45),
-    ("封号了，求助怎么解封，没开挂啊。", 0.0),
-    ("兄弟们我找到了一个刷钱的BUG，不知道会不会封。", 0.3),
-    ("这个游戏是不是要凉了？官方好久没发公告了。", 0.35),
-    ("联机连不上，一直显示连接超时，有人遇到吗？", 0.15),
-    ("存档在哪个文件夹？想备份一下防止掉档。", 0.4),
-    ("充值了但是没到账，怎么办？吧友们支个招。", 0.0),
-    ("抽卡概率统计，我用了200抽测试，结果惨不忍睹。", 0.2),
-    ("闪退闪退闪退，第四次了，心态炸了。", 0.0),
-    ("推荐一下类似的游戏，这个玩腻了。", 0.6),
-    ("和朋友开黑真的快乐，游戏嘛，开心最重要。", 0.9),
-]
+    def _http_get(self, url: str, params: Dict = None, headers: Dict = None) -> Optional[dict]:
+        h = {"User-Agent": _UA}
+        if headers:
+            h.update(headers)
+        try:
+            r = requests.get(url, params=params, headers=h, timeout=_TIMEOUT)
+            if r.status_code != 200:
+                raise SourceUnavailableError(f"HTTP {r.status_code}")
+            ct = r.headers.get("Content-Type", "")
+            if "application/json" in ct or ct == "":
+                try:
+                    return r.json()
+                except Exception:
+                    return {"_raw_html": r.text}
+            return {"_raw_html": r.text}
+        except requests.RequestException as e:
+            raise SourceUnavailableError(f"网络错误: {e.__class__.__name__}")
 
 
-class MockSource(BaseSource):
-    def __init__(self, source_name: str, pool: List[tuple]):
-        self._name = source_name
-        self._pool = pool
+def _parse_time_range(tr: str) -> int:
+    tr = tr.strip().lower()
+    if tr.endswith("h"):
+        return int(tr[:-1])
+    elif tr.endswith("d"):
+        return int(tr[:-1]) * 24
+    try:
+        return int(tr)
+    except ValueError:
+        return 24
 
-    @property
-    def name(self):
-        return self._name
+
+def _filter_by_time(posts: List[Dict], time_range: str) -> List[Dict]:
+    hours = _parse_time_range(time_range)
+    cutoff = int(time.time()) - hours * 3600
+    return [p for p in posts if p.get("created_at", 0) >= cutoff]
+
+
+def _estimate_sentiment(text: str) -> float:
+    neg_kw = ["闪退", "掉档", "退款", "崩溃", "黑屏", "卡顿", "封号", "外挂", "报错", "炸了",
+              "垃圾", "恶心", "差评", "玩不了", "连不上", "进不去", "坑", "差", "垃圾", "骗钱",
+              "不到账", "维护", "卡", "崩", "破防", "虐", "难玩", "劝退", "严重"]
+    pos_kw = ["好评", "喜欢", "不错", "推荐", "棒", "绝", "神作", "惊喜", "稳定", "丝滑",
+              "沉浸", "用心", "细腻", "流畅", "值", "惊艳", "满意", "舒服", "快乐", "治愈"]
+    s = 0.5
+    for k in neg_kw:
+        if k in text:
+            s -= 0.12
+    for k in pos_kw:
+        if k in text:
+            s += 0.12
+    if "！" in text or "!" in text:
+        s -= 0.03
+    if "？" in text or "?" in text:
+        s -= 0.02
+    return max(0.0, min(1.0, s))
+
+
+def _calc_priority(content: str, sentiment: float) -> float:
+    score = 0.0
+    if sentiment < 0.3:
+        score += 5.0
+    high_words = ["闪退", "掉档", "退款", "崩溃", "黑屏", "封号", "外挂", "服务器", "报错", "充值", "不到账"]
+    for w in high_words:
+        if w in content:
+            score += 2.0
+    if "!" in content or "！" in content:
+        score += 0.5
+    if content.count("？") + content.count("?") >= 2:
+        score += 0.3
+    return score + random.uniform(0, 0.5)
+
+
+# =====================================================================
+# Steam 源：使用 Store Search + Store Reviews 公开 JSON API
+# =====================================================================
+_STEAM_ALIAS = {
+    "星露谷物语": "Stardew Valley",
+    "星露谷": "Stardew Valley",
+    "艾尔登法环": "Elden Ring",
+    "老头环": "Elden Ring",
+    "赛博朋克2077": "Cyberpunk 2077",
+    "只狼": "Sekiro",
+    "黑暗之魂": "Dark Souls",
+    "黑魂": "Dark Souls",
+    "荒野大镖客": "Red Dead Redemption",
+    "原神": "Genshin Impact",
+    "空洞骑士": "Hollow Knight",
+    "泰拉瑞亚": "Terraria",
+    "我的世界": "Minecraft",
+    "传送门": "Portal",
+    "巫师3": "The Witcher 3",
+    "塞尔达传说": "The Legend of Zelda",
+    "动物森友会": "Animal Crossing",
+    "动物之森": "Animal Crossing",
+    "怪物猎人": "Monster Hunter",
+    "求生之路": "Left 4 Dead",
+    "求生之路2": "Left 4 Dead 2",
+    "csgo": "Counter-Strike",
+    "反恐精英": "Counter-Strike",
+    "dota2": "Dota 2",
+    "刀塔2": "Dota 2",
+    "绝地求生": "PUBG",
+    "吃鸡": "PUBG",
+    "among us": "Among Us",
+    "我们之间": "Among Us",
+    "双人成行": "It Takes Two",
+    "战神": "God of War",
+    "最后生还者": "The Last of Us",
+    "美末": "The Last of Us",
+    "底特律变人": "Detroit",
+    "底特律": "Detroit",
+    "瘟疫公司": "Plague Inc",
+    "中国式家长": "Chinese Parents",
+    "太吾绘卷": "The Scroll Of Taiwu",
+    "鬼谷八荒": "Guigubahuang",
+    "暖雪": "Warm Snow",
+    "黑神话悟空": "Black Myth",
+    "黑神话：悟空": "Black Myth",
+    "失落城堡": "Lost Castle",
+    "骑砍": "Mount & Blade",
+    "骑马与砍杀": "Mount & Blade",
+    "杀戮尖塔": "Slay the Spire",
+    "文明6": "Sid Meier's Civilization VI",
+    "文明": "Civilization",
+    "无人深空": "No Man's Sky",
+    "星空": "Starfield",
+    "辐射4": "Fallout 4",
+    "辐射": "Fallout",
+    "上古卷轴5": "The Elder Scrolls V",
+    "老滚5": "The Elder Scrolls",
+    "博德之门3": "Baldur's Gate 3",
+    "博德之门": "Baldur's Gate",
+}
+
+class SteamSource(BaseSource):
+    name = "steam"
+
+    def _search_appid(self, game: str) -> Optional[str]:
+        candidates = [game]
+        alias = _STEAM_ALIAS.get(game) or _STEAM_ALIAS.get(game.lower())
+        if alias:
+            candidates.insert(0, alias)
+        candidates.append(game.lower())
+        seen = set()
+        search_terms = []
+        for c in candidates:
+            if c and c not in seen:
+                search_terms.append(c)
+                seen.add(c)
+
+        search_cfgs = [
+            {"l": "schinese", "cc": "cn"},
+            {"cc": "cn"},
+            {},
+        ]
+
+        for term in search_terms:
+            for cfg in search_cfgs:
+                params = {"term": term}
+                params.update(cfg)
+                try:
+                    data = self._http_get(
+                        "https://store.steampowered.com/api/storesearch/",
+                        params=params,
+                    )
+                except SourceUnavailableError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                items = data.get("items") or []
+                if items:
+                    app = items[0]
+                    if app.get("type") in ("app", "bundle", None):
+                        return str(app["id"])
+        return None
 
     def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
-        posts = []
-        pool = list(self._pool)
-        random.shuffle(pool)
+        appid = self._search_appid(game)
+        if not appid:
+            raise SourceUnavailableError(f"未在Steam商店找到游戏: {game}")
 
-        hours = _parse_time_range(time_range)
-        now = int(time.time())
-        base_count = min(limit, max(10, int(hours * 1.5) + 10))
+        reviews = []
+        cursor = "*"
+        seen_ids = set()
+        max_pages = 3
+        for _ in range(max_pages):
+            data = self._http_get(
+                f"https://store.steampowered.com/appreviews/{appid}",
+                params={
+                    "json": "1",
+                    "filter": "recent",
+                    "language": "schinese",
+                    "num_per_page": min(limit, 100),
+                    "cursor": cursor,
+                    "purchase_type": "all",
+                },
+            )
+            if not isinstance(data, dict) or data.get("success") != 1:
+                break
+            for rev in data.get("reviews", []):
+                rid = rev.get("recommendationid")
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+                author = (rev.get("author") or {}).get("steamid", "steam_user")
+                content = (rev.get("review") or "").strip()
+                if not content:
+                    continue
+                voted_up = rev.get("voted_up", False)
+                base_s = 0.8 if voted_up else 0.2
+                sentiment = (base_s + _estimate_sentiment(content)) / 2
+                url = f"https://steamcommunity.com/app/{appid}/recommended/{rid}/"
+                reviews.append({
+                    "source": "steam",
+                    "post_id": f"steam_{rid}",
+                    "content": content,
+                    "author": f"steam_{author[:10]}",
+                    "url": url,
+                    "sentiment": sentiment,
+                    "created_at": rev.get("timestamp_created", int(time.time())),
+                    "priority": 0,
+                })
+            cursor = data.get("cursor")
+            if not cursor or not data.get("reviews"):
+                break
 
-        for i in range(base_count):
-            content, sentiment = random.choice(pool)
-            created_at = now - random.randint(0, max(1, hours * 3600))
-            post_id = hashlib.md5(f"{self._name}-{game}-{i}-{created_at}".encode()).hexdigest()[:12]
-            author = _random_author()
+        if not reviews:
+            raise SourceUnavailableError("Steam 评论为空或API限制访问")
+
+        for r in reviews:
+            r["priority"] = _calc_priority(r["content"], r["sentiment"])
+
+        filtered = _filter_by_time(reviews, time_range)
+        filtered.sort(key=lambda x: x["priority"], reverse=True)
+        return filtered[:limit]
+
+
+# =====================================================================
+# TapTap 源：使用 webapiv2 搜索应用 + 评论接口
+# =====================================================================
+class TapTapSource(BaseSource):
+    name = "taptap"
+
+    def _search_app(self, game: str) -> Optional[Dict]:
+        data = self._http_get(
+            "https://www.taptap.cn/webapiv2/search-app",
+            params={"query": game, "limit": "5"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        if not isinstance(data, dict):
+            return None
+        data = data.get("data") or data
+        if isinstance(data, dict):
+            items = (data.get("apps") or data.get("list") or [])
+        else:
+            items = []
+        if not items:
+            return None
+        app = items[0]
+        app_id = str(app.get("id") or app.get("app_id") or app.get("appid") or "")
+        title = app.get("title") or app.get("name") or ""
+        if not app_id:
+            return None
+        return {"id": app_id, "title": title}
+
+    def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
+        app = self._search_app(game)
+        if not app:
+            raise SourceUnavailableError(f"未在TapTap找到游戏: {game}")
+        app_id = app["id"]
+
+        posts: List[Dict] = []
+        seen_ids = set()
+
+        review_data = self._http_get(
+            "https://www.taptap.cn/webapiv2/review",
+            params={
+                "app_id": app_id,
+                "limit": str(min(limit, 50)),
+                "sort": "new",
+            },
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        if isinstance(review_data, dict):
+            rdata = review_data.get("data") or review_data
+            items = []
+            if isinstance(rdata, dict):
+                items = rdata.get("list") or rdata.get("reviews") or []
+            elif isinstance(rdata, list):
+                items = rdata
+            for item in items:
+                rid = str(item.get("id") or item.get("review_id") or "")
+                if not rid or rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+                user = item.get("author") or item.get("user") or {}
+                uname = user.get("name") or user.get("nickname") or f"taptap_{rid[:8]}"
+                content = str(item.get("contents") or item.get("content") or item.get("text") or "").strip()
+                if not content:
+                    continue
+                rating = item.get("star") or item.get("rating") or item.get("score") or 3
+                base_s = ((float(rating) if isinstance(rating, (int, float)) else 3.0) - 1) / 4
+                sentiment = (base_s + _estimate_sentiment(content)) / 2
+                created_at = item.get("created_at") or item.get("create_time") or item.get("updated_at")
+                if isinstance(created_at, (int, float)):
+                    ts = int(created_at)
+                elif isinstance(created_at, str):
+                    try:
+                        ts = int(time.mktime(time.strptime(created_at[:19], "%Y-%m-%d %H:%M:%S")))
+                    except Exception:
+                        ts = int(time.time())
+                else:
+                    ts = int(time.time())
+                url = f"https://www.taptap.cn/app/{app_id}/review/{rid}"
+                posts.append({
+                    "source": "taptap",
+                    "post_id": f"taptap_{rid}",
+                    "content": content,
+                    "author": str(uname),
+                    "url": url,
+                    "sentiment": sentiment,
+                    "created_at": ts,
+                    "priority": 0,
+                })
+
+        if not posts:
+            fallback = self._fallback_search_taptap(game, limit)
+            posts.extend(fallback)
+
+        if not posts:
+            raise SourceUnavailableError("TapTap接口未返回数据或地区限制")
+
+        for r in posts:
+            r["priority"] = _calc_priority(r["content"], r["sentiment"])
+
+        filtered = _filter_by_time(posts, time_range)
+        filtered.sort(key=lambda x: x["priority"], reverse=True)
+        return filtered[:limit]
+
+    def _fallback_search_taptap(self, game: str, limit: int) -> List[Dict]:
+        data = self._http_get(
+            "https://www.taptap.cn/webapiv2/search-topic",
+            params={"query": game, "limit": str(limit)},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        if not isinstance(data, dict):
+            return []
+        rdata = data.get("data") or data
+        items = []
+        if isinstance(rdata, dict):
+            items = rdata.get("list") or rdata.get("topics") or []
+        elif isinstance(rdata, list):
+            items = rdata
+        out = []
+        for it in items:
+            tid = str(it.get("id") or it.get("topic_id") or "")
+            if not tid:
+                continue
+            user = it.get("author") or {}
+            uname = user.get("name") or f"taptap_user"
+            content = str(it.get("contents") or it.get("summary") or it.get("title") or "").strip()
+            if not content:
+                continue
+            ts = int(time.time()) - random.randint(0, 3 * 3600)
+            out.append({
+                "source": "taptap",
+                "post_id": f"taptap_topic_{tid}",
+                "content": content,
+                "author": uname,
+                "url": f"https://www.taptap.cn/topic/{tid}",
+                "sentiment": _estimate_sentiment(content),
+                "created_at": ts,
+                "priority": 0,
+            })
+        return out
+
+
+# =====================================================================
+# B站 源：搜索视频接口，返回视频标题+简介内容
+# =====================================================================
+class BilibiliSource(BaseSource):
+    name = "bilibili"
+
+    def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
+        keyword = f"{game} 反馈"
+        data = self._http_get(
+            "https://api.bilibili.com/x/web-interface/search/type",
+            params={"search_type": "video", "keyword": keyword, "order": "pubdate", "page": "1"},
+            headers={"Referer": "https://search.bilibili.com/"},
+        )
+        if not isinstance(data, dict) or data.get("code") != 0:
+            raise SourceUnavailableError(f"B站搜索失败: {data.get('message') if isinstance(data, dict) else '格式异常'}")
+
+        result = (data.get("data") or {}).get("result") or []
+        if not result:
+            raise SourceUnavailableError(f"B站未找到与 {game} 相关的视频")
+
+        posts: List[Dict] = []
+        for v in result:
+            bvid = v.get("bvid") or v.get("id")
+            aid = v.get("aid")
+            if not bvid and not aid:
+                continue
+            title = re.sub(r"<[^>]+>", "", str(v.get("title") or ""))
+            desc = str(v.get("description") or "").strip()
+            content = (title + " | " + desc).strip(" |")
+            if not content:
+                continue
+            author = str(v.get("author") or v.get("uname") or "b站用户")
+            pub = v.get("pubdate") or v.get("senddate")
+            if isinstance(pub, (int, float)):
+                ts = int(pub)
+            else:
+                ts = int(time.time()) - random.randint(0, 24 * 3600)
+            url = f"https://www.bilibili.com/video/{bvid}" if bvid else f"https://www.bilibili.com/video/av{aid}"
+            sentiment = _estimate_sentiment(content)
             posts.append({
-                "source": self._name,
-                "post_id": post_id,
+                "source": "bilibili",
+                "post_id": f"bili_{bvid or aid}",
                 "content": content,
                 "author": author,
-                "url": f"https://{self._name}.example.com/post/{post_id}",
+                "url": url,
                 "sentiment": sentiment,
-                "created_at": created_at,
-                "priority": _calc_priority(content, sentiment),
+                "created_at": ts,
+                "priority": 0,
             })
 
-        posts.sort(key=lambda x: x["priority"], reverse=True)
-        return posts
+        if not posts:
+            raise SourceUnavailableError("B站搜索结果为空")
+
+        for r in posts:
+            r["priority"] = _calc_priority(r["content"], r["sentiment"])
+
+        filtered = _filter_by_time(posts, time_range)
+        filtered.sort(key=lambda x: x["priority"], reverse=True)
+        return filtered[:limit]
 
 
-class SteamSource(MockSource):
-    def __init__(self):
-        super().__init__("steam", _MOCK_STEAM_REVIEWS)
+# =====================================================================
+# 贴吧 源：搜索接口
+# =====================================================================
+class TiebaSource(BaseSource):
+    name = "tieba"
 
+    def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
+        posts: List[Dict] = []
 
-class TapTapSource(MockSource):
-    def __init__(self):
-        super().__init__("taptap", _MOCK_TAPTAP)
+        kw = game.strip()
+        data = self._http_get(
+            "https://tieba.baidu.com/f/search/res",
+            params={"ie": "utf-8", "qw": kw, "rn": str(min(limit, 50)), "un": "", "only_thread": "0"},
+            headers={"Referer": "https://tieba.baidu.com/"},
+        )
+        html = ""
+        if isinstance(data, dict) and "_raw_html" in data:
+            html = data["_raw_html"]
+        elif isinstance(data, str):
+            html = data
+        if not html:
+            raise SourceUnavailableError("贴吧搜索无响应或反爬限制")
 
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.select(".s_post") or soup.select(".p_content") or soup.find_all("div", class_=re.compile(r"s_post|post"))
+        for idx, card in enumerate(cards[:limit]):
+            title_a = card.find("a", class_="bluelink") or card.find("a", href=re.compile(r"/p/\d+"))
+            content_node = card.find(class_="p_content") or card.find(class_="s_content") or card
+            user_node = card.find(class_="s_user") or card.find("a", class_=re.compile(r"user"))
+            time_node = card.find(class_="s-post-create-time") or card.find(class_="s_time") or card.find(class_="p_date")
 
-class BilibiliSource(MockSource):
-    def __init__(self):
-        super().__init__("bilibili", _MOCK_BILIBILI)
+            href = title_a["href"] if title_a and title_a.has_attr("href") else ""
+            tid_match = re.search(r"/p/(\d+)", href) if href else None
+            tid = tid_match.group(1) if tid_match else f"tieba_{idx}"
+            title = (title_a.get_text(strip=True) if title_a else "")
+            body = content_node.get_text(" ", strip=True) if content_node else ""
+            content = f"{title} | {body}".strip(" |")
+            if len(content) < 5:
+                continue
+            author = (user_node.get_text(strip=True) if user_node else f"吧友{idx+1}")
+            if time_node:
+                ttxt = time_node.get_text(strip=True)
+                ts = self._parse_tieba_time(ttxt)
+            else:
+                ts = int(time.time()) - random.randint(0, 72 * 3600)
+            url = f"https://tieba.baidu.com{href}" if href.startswith("/") else (href or f"https://tieba.baidu.com/f?kw={kw}")
+            sentiment = _estimate_sentiment(content)
+            posts.append({
+                "source": "tieba",
+                "post_id": f"tieba_{tid}",
+                "content": content[:500],
+                "author": author[:16],
+                "url": url,
+                "sentiment": sentiment,
+                "created_at": ts,
+                "priority": 0,
+            })
 
+        if not posts:
+            raise SourceUnavailableError("贴吧未解析到帖子或关键词无匹配")
 
-class TiebaSource(MockSource):
-    def __init__(self):
-        super().__init__("tieba", _MOCK_TIEBA)
+        for r in posts:
+            r["priority"] = _calc_priority(r["content"], r["sentiment"])
+
+        filtered = _filter_by_time(posts, time_range)
+        filtered.sort(key=lambda x: x["priority"], reverse=True)
+        return filtered[:limit]
+
+    def _parse_tieba_time(self, txt: str) -> int:
+        now = int(time.time())
+        txt = txt.strip()
+        m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", txt)
+        if m:
+            try:
+                return int(time.mktime(time.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)} 12:00:00", "%Y-%m-%d %H:%M:%S")))
+            except Exception:
+                pass
+        m = re.match(r"(\d{1,2})-(\d{1,2})", txt)
+        if m:
+            y = time.localtime().tm_year
+            try:
+                return int(time.mktime(time.strptime(f"{y}-{m.group(1)}-{m.group(2)} 12:00:00", "%Y-%m-%d %H:%M:%S")))
+            except Exception:
+                pass
+        if "分钟前" in txt or "小时前" in txt:
+            h = 1 if "分钟" in txt else 6
+            return now - h * 3600
+        if "昨天" in txt:
+            return now - 24 * 3600
+        if "前天" in txt:
+            return now - 48 * 3600
+        return now - random.randint(1, 72) * 3600
 
 
 _SOURCE_MAP = {
@@ -217,49 +574,26 @@ def get_source(name: str) -> BaseSource:
     return cls()
 
 
-def fetch_all(game: str, sources: List[str], time_range: str, per_source_limit: int = 100) -> List[Dict]:
-    all_posts = []
+def fetch_all(
+    game: str,
+    sources: List[str],
+    time_range: str,
+    per_source_limit: int = 100,
+) -> Tuple[List[Dict], Dict[str, Dict]]:
+    """
+    返回 (所有帖子, 每个来源的状态字典)
+    状态格式: {source_name: {"ok": True, "count": N} | {"ok": False, "reason": str}}
+    """
+    all_posts: List[Dict] = []
+    statuses: Dict[str, Dict] = {}
     for src_name in sources:
         try:
             src = get_source(src_name)
             posts = src.fetch(game, time_range, limit=per_source_limit)
             all_posts.extend(posts)
+            statuses[src_name] = {"ok": True, "count": len(posts)}
+        except SourceUnavailableError as e:
+            statuses[src_name] = {"ok": False, "reason": str(e)}
         except Exception as e:
-            print(f"[warn] source {src_name} fetch failed: {e}")
-    return all_posts
-
-
-def _parse_time_range(tr: str) -> int:
-    tr = tr.strip().lower()
-    if tr.endswith("h"):
-        return int(tr[:-1])
-    elif tr.endswith("d"):
-        return int(tr[:-1]) * 24
-    else:
-        try:
-            return int(tr)
-        except ValueError:
-            return 24
-
-
-def _random_author() -> str:
-    prefixes = ["玩家", "路人", "老铁", "老", "小", "大"]
-    names = ["小明", "阿强", "张三", "李四", "王五", "老六", "咸鱼", "柠檬", "橘子", "可乐",
-             "雪碧", "咖啡", "奶茶", "布丁", "蛋糕", "饼干", "糖糖", "豆豆", "毛毛", "球球"]
-    suffix = str(random.randint(100, 9999))
-    return random.choice(prefixes) + random.choice(names) + suffix
-
-
-def _calc_priority(content: str, sentiment: float) -> float:
-    score = 0.0
-    if sentiment < 0.3:
-        score += 5.0
-    high_words = ["闪退", "掉档", "退款", "崩溃", "黑屏", "封号", "外挂", "服务器", "报错", "充值", "不到账"]
-    for w in high_words:
-        if w in content:
-            score += 2.0
-    if "!" in content or "！" in content:
-        score += 0.5
-    if content.count("？") + content.count("?") >= 2:
-        score += 0.3
-    return score + random.uniform(0, 0.5)
+            statuses[src_name] = {"ok": False, "reason": f"{e.__class__.__name__}: {e}"}
+    return all_posts, statuses

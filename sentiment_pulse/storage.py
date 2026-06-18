@@ -71,6 +71,10 @@ def _seed_default_watchlist(conn):
             )
 
 
+def _sources_key(sources: List[str]) -> str:
+    return json.dumps(sorted(set(sources)), ensure_ascii=False)
+
+
 def save_scan(
     game: str,
     sources: List[str],
@@ -80,32 +84,30 @@ def save_scan(
     negative_posts: int = 0,
 ) -> int:
     now = int(time.time())
+    sources_key = _sources_key(sources)
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO scans (game, sources, time_range, scanned_at, keyword_freq, total_posts, negative_posts)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (game, json.dumps(sources, ensure_ascii=False), time_range, now,
+            (game, sources_key, time_range, now,
              json.dumps(keyword_freq, ensure_ascii=False), total_posts, negative_posts)
         )
         return cur.lastrowid
 
 
 def get_previous_scan(game: str, sources: List[str], time_range: str) -> Optional[Dict]:
-    sources_key = json.dumps(sources, ensure_ascii=False)
+    sources_key = _sources_key(sources)
     with get_conn() as conn:
         cur = conn.execute(
             """SELECT * FROM scans
                WHERE game = ? AND sources = ? AND time_range = ?
-               ORDER BY scanned_at DESC LIMIT 2""",
+               ORDER BY scanned_at DESC LIMIT 1""",
             (game, sources_key, time_range)
         )
         rows = cur.fetchall()
-        if len(rows) >= 2:
-            row = rows[1]
-        elif len(rows) == 1:
+        if not rows:
             return None
-        else:
-            return None
+        row = rows[0]
         return {
             "id": row["id"],
             "scanned_at": row["scanned_at"],

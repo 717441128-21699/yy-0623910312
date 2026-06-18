@@ -1,5 +1,12 @@
 import sys
+import os
+import io
 import time
+
+if sys.platform.startswith("win"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import click
 
@@ -29,20 +36,32 @@ def scan(game, sources, time_range, limit, no_save):
     """执行舆情巡检"""
     if not sources:
         sources = tuple(DEFAULT_SOURCES)
-    sources_list = list(sources)
+    sources_list = sorted(set(sources))
 
     display.render_info(f"正在扫描社区... 游戏=[bold yellow]{game}[/bold yellow]  "
                         f"来源=[bold cyan]{', '.join(sources_list)}[/bold cyan]  "
                         f"窗口=[bold]{time_range}[/bold]")
 
     try:
-        posts = source_module.fetch_all(game, sources_list, time_range, per_source_limit=limit)
+        posts, statuses = source_module.fetch_all(game, sources_list, time_range, per_source_limit=limit)
     except Exception as e:
         display.render_error(f"数据获取失败: {e}")
         sys.exit(1)
 
+    display.render_source_statuses(statuses)
+
+    ok_sources = [n for n, s in statuses.items() if s.get("ok") and s.get("count", 0) > 0]
+    bad_sources = [n for n, s in statuses.items() if not s.get("ok")]
+
+    if bad_sources and not ok_sources:
+        display.render_error("所有来源均不可用，未获取到任何有效帖子。请稍后重试或更换关键词/来源。")
+        sys.exit(1)
+
     if not posts:
-        display.render_error(f"未获取到任何帖子，请检查参数或稍后重试。")
+        display.render_error(
+            f"指定时间窗口内没有帖子（窗口={time_range}）。"
+            f"可尝试扩大窗口到 3d / 7d，或更换更热门的游戏关键词。"
+        )
         sys.exit(1)
 
     previous = storage.get_previous_scan(game, sources_list, time_range)
@@ -75,7 +94,10 @@ def scan(game, sources, time_range, limit, no_save):
     if previous:
         ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(previous["scanned_at"]))
         click.echo()
-        click.secho(f"💡 上一次巡检: {ts} (可多次运行观察趋势变化)", dim=True)
+        click.secho(f"💡 上一次巡检: {ts} (基于该基线计算变化与告警)", dim=True)
+    else:
+        click.echo()
+        click.secho(f"ℹ️  首次运行（无基线）。再次运行相同参数将显示变化对比与关注告警。", dim=True)
 
 
 @cli.group(help="⭐ 关注清单管理 (关键词异常波动时醒目提示)")

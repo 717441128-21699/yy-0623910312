@@ -235,6 +235,44 @@ def render_watchlist(watchlist: List[Dict]):
     console.print(Panel(table, title="[bold]⭐ 关注清单[/bold]", border_style="magenta", box=box.ROUNDED))
 
 
+def render_source_statuses(statuses: Dict[str, Dict]):
+    from rich.table import Table
+    from rich.text import Text
+
+    table = Table(show_header=True, header_style="bold", box=box.ROUNDED, expand=True)
+    table.add_column("来源", style="bold", width=12)
+    table.add_column("状态", width=10, justify="center")
+    table.add_column("详情", style="dim")
+
+    order = ["steam", "taptap", "bilibili", "tieba"]
+    shown = set()
+    for src_name in order:
+        if src_name in statuses:
+            _render_status_row(table, src_name, statuses[src_name])
+            shown.add(src_name)
+    for src_name, st in statuses.items():
+        if src_name not in shown:
+            _render_status_row(table, src_name, st)
+
+    console.print(Panel(table, title="[bold]📡 来源抓取状态[/bold]", border_style="cyan", box=box.ROUNDED))
+
+
+def _render_status_row(table, src_name: str, st: Dict):
+    source_label = {
+        "steam": "[bold deep_sky_blue1]Steam[/bold deep_sky_blue1]",
+        "taptap": "[bold green]TapTap[/bold green]",
+        "bilibili": "[bold pink]B站[/bold pink]",
+        "tieba": "[bold blue]贴吧[/bold blue]",
+    }.get(src_name.lower(), src_name)
+    if st.get("ok"):
+        status = Text("成功", style="bold green")
+        detail = f"获取 {st.get('count', 0)} 条帖子"
+    else:
+        status = Text("不可用", style="bold red")
+        detail = f"[red]{st.get('reason', '未知原因')}[/red]"
+    table.add_row(source_label, status, detail)
+
+
 def render_result(result: Dict, game: str, sources: List[str], time_range: str,
                   scanned_at: int, previous_summary: Dict = None):
     render_header(game, sources, time_range, scanned_at)
@@ -250,15 +288,15 @@ def render_result(result: Dict, game: str, sources: List[str], time_range: str,
 
 
 def render_error(msg: str):
-    console.print(Panel(Text(msg, style="bold red"), title="[bold]❌ 错误[/bold]",
-                        border_style="red", box=box.ROUNDED))
+    console.print(Panel(msg, title="[bold]❌ 错误[/bold]",
+                        border_style="red", box=box.ROUNDED, style="bold red"))
 
 
 def render_info(msg: str):
-    console.print(Panel(Text(msg, style="cyan"), title="[bold]ℹ️  提示[/bold]",
-                        border_style="cyan", box=box.ROUNDED))
+    console.print(Panel(msg, title="[bold]ℹ️  提示[/bold]",
+                        border_style="cyan", box=box.ROUNDED, style="cyan"))
 
 
 def render_success(msg: str):
-    console.print(Panel(Text(msg, style="bold green"), title="[bold]✅ 完成[/bold]",
-                        border_style="green", box=box.ROUNDED))
+    console.print(Panel(msg, title="[bold]✅ 完成[/bold]",
+                        border_style="green", box=box.ROUNDED, style="bold green"))
