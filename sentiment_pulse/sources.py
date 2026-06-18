@@ -20,11 +20,21 @@ class SourceUnavailableError(Exception):
     pass
 
 
+class FetchResult:
+    def __init__(self, posts: List[Dict], stats: Dict = None):
+        self.posts = posts
+        self.stats = stats or {
+            "raw_count": len(posts),
+            "time_unknown_count": 0,
+            "filtered_out_by_time": 0,
+        }
+
+
 class BaseSource(ABC):
     name = "base"
 
     @abstractmethod
-    def fetch(self, game: str, time_range: str, limit: int = 200) -> List[Dict]:
+    def fetch(self, game: str, time_range: str, limit: int = 200) -> FetchResult:
         pass
 
     def _http_get(self, url: str, params: Dict = None, headers: Dict = None) -> Optional[dict]:
@@ -58,24 +68,40 @@ def _parse_time_range(tr: str) -> int:
         return 24
 
 
-def _filter_by_time(posts: List[Dict], time_range: str) -> List[Dict]:
+def _filter_by_time(posts: List[Dict], time_range: str) -> Tuple[List[Dict], int, int]:
+    """
+    返回 (过滤后列表, 时间不明数量, 被时间过滤掉的数量)
+    时间不明 (created_at=0 or None) 的帖子不参与短窗口统计，直接排除。
+    """
     hours = _parse_time_range(time_range)
     cutoff = int(time.time()) - hours * 3600
-    return [p for p in posts if p.get("created_at", 0) >= cutoff]
+    filtered = []
+    time_unknown = 0
+    filtered_out = 0
+    for p in posts:
+        ts = p.get("created_at") or 0
+        if ts <= 0:
+            time_unknown += 1
+            continue
+        if ts >= cutoff:
+            filtered.append(p)
+        else:
+            filtered_out += 1
+    return filtered, time_unknown, filtered_out
 
 
 def _estimate_sentiment(text: str) -> float:
     neg_kw = ["闪退", "掉档", "退款", "崩溃", "黑屏", "卡顿", "封号", "外挂", "报错", "炸了",
-              "垃圾", "恶心", "差评", "玩不了", "连不上", "进不去", "坑", "差", "垃圾", "骗钱",
-              "不到账", "维护", "卡", "崩", "破防", "虐", "难玩", "劝退", "严重"]
+              "垃圾", "恶心", "差评", "玩不了", "连不上", "进不去", "坑", "差", "骗钱",
+              "不到账", "维护", "卡", "崩", "破防", "虐", "难玩", "劝退", "严重", "crash"]
     pos_kw = ["好评", "喜欢", "不错", "推荐", "棒", "绝", "神作", "惊喜", "稳定", "丝滑",
               "沉浸", "用心", "细腻", "流畅", "值", "惊艳", "满意", "舒服", "快乐", "治愈"]
     s = 0.5
     for k in neg_kw:
-        if k in text:
+        if k.lower() in text.lower():
             s -= 0.12
     for k in pos_kw:
-        if k in text:
+        if k.lower() in text.lower():
             s += 0.12
     if "！" in text or "!" in text:
         s -= 0.03
@@ -88,9 +114,9 @@ def _calc_priority(content: str, sentiment: float) -> float:
     score = 0.0
     if sentiment < 0.3:
         score += 5.0
-    high_words = ["闪退", "掉档", "退款", "崩溃", "黑屏", "封号", "外挂", "服务器", "报错", "充值", "不到账"]
+    high_words = ["闪退", "掉档", "退款", "崩溃", "黑屏", "封号", "外挂", "服务器", "报错", "充值", "不到账", "crash"]
     for w in high_words:
-        if w in content:
+        if w.lower() in content.lower():
             score += 2.0
     if "!" in content or "！" in content:
         score += 0.5
@@ -100,17 +126,14 @@ def _calc_priority(content: str, sentiment: float) -> float:
 
 
 # =====================================================================
-# Steam 源：使用 Store Search + Store Reviews 公开 JSON API
+# Steam 源
 # =====================================================================
 _STEAM_ALIAS = {
-    "星露谷物语": "Stardew Valley",
-    "星露谷": "Stardew Valley",
-    "艾尔登法环": "Elden Ring",
-    "老头环": "Elden Ring",
+    "星露谷物语": "Stardew Valley", "星露谷": "Stardew Valley",
+    "艾尔登法环": "Elden Ring", "老头环": "Elden Ring",
     "赛博朋克2077": "Cyberpunk 2077",
     "只狼": "Sekiro",
-    "黑暗之魂": "Dark Souls",
-    "黑魂": "Dark Souls",
+    "黑暗之魂": "Dark Souls", "黑魂": "Dark Souls",
     "荒野大镖客": "Red Dead Redemption",
     "原神": "Genshin Impact",
     "空洞骑士": "Hollow Knight",
@@ -119,46 +142,33 @@ _STEAM_ALIAS = {
     "传送门": "Portal",
     "巫师3": "The Witcher 3",
     "塞尔达传说": "The Legend of Zelda",
-    "动物森友会": "Animal Crossing",
-    "动物之森": "Animal Crossing",
+    "动物森友会": "Animal Crossing", "动物之森": "Animal Crossing",
     "怪物猎人": "Monster Hunter",
     "求生之路": "Left 4 Dead",
     "求生之路2": "Left 4 Dead 2",
-    "csgo": "Counter-Strike",
-    "反恐精英": "Counter-Strike",
-    "dota2": "Dota 2",
-    "刀塔2": "Dota 2",
-    "绝地求生": "PUBG",
-    "吃鸡": "PUBG",
-    "among us": "Among Us",
-    "我们之间": "Among Us",
+    "csgo": "Counter-Strike", "反恐精英": "Counter-Strike",
+    "dota2": "Dota 2", "刀塔2": "Dota 2",
+    "绝地求生": "PUBG", "吃鸡": "PUBG",
+    "among us": "Among Us", "我们之间": "Among Us",
     "双人成行": "It Takes Two",
     "战神": "God of War",
-    "最后生还者": "The Last of Us",
-    "美末": "The Last of Us",
-    "底特律变人": "Detroit",
-    "底特律": "Detroit",
+    "最后生还者": "The Last of Us", "美末": "The Last of Us",
+    "底特律变人": "Detroit", "底特律": "Detroit",
     "瘟疫公司": "Plague Inc",
     "中国式家长": "Chinese Parents",
     "太吾绘卷": "The Scroll Of Taiwu",
     "鬼谷八荒": "Guigubahuang",
     "暖雪": "Warm Snow",
-    "黑神话悟空": "Black Myth",
-    "黑神话：悟空": "Black Myth",
+    "黑神话悟空": "Black Myth", "黑神话：悟空": "Black Myth",
     "失落城堡": "Lost Castle",
-    "骑砍": "Mount & Blade",
-    "骑马与砍杀": "Mount & Blade",
+    "骑砍": "Mount & Blade", "骑马与砍杀": "Mount & Blade",
     "杀戮尖塔": "Slay the Spire",
-    "文明6": "Sid Meier's Civilization VI",
-    "文明": "Civilization",
+    "文明6": "Sid Meier's Civilization VI", "文明": "Civilization",
     "无人深空": "No Man's Sky",
     "星空": "Starfield",
-    "辐射4": "Fallout 4",
-    "辐射": "Fallout",
-    "上古卷轴5": "The Elder Scrolls V",
-    "老滚5": "The Elder Scrolls",
-    "博德之门3": "Baldur's Gate 3",
-    "博德之门": "Baldur's Gate",
+    "辐射4": "Fallout 4", "辐射": "Fallout",
+    "上古卷轴5": "The Elder Scrolls V", "老滚5": "The Elder Scrolls V",
+    "博德之门3": "Baldur's Gate 3", "博德之门": "Baldur's Gate",
 }
 
 class SteamSource(BaseSource):
@@ -176,13 +186,7 @@ class SteamSource(BaseSource):
             if c and c not in seen:
                 search_terms.append(c)
                 seen.add(c)
-
-        search_cfgs = [
-            {"l": "schinese", "cc": "cn"},
-            {"cc": "cn"},
-            {},
-        ]
-
+        search_cfgs = [{"l": "schinese", "cc": "cn"}, {"cc": "cn"}, {}]
         for term in search_terms:
             for cfg in search_cfgs:
                 params = {"term": term}
@@ -203,7 +207,7 @@ class SteamSource(BaseSource):
                         return str(app["id"])
         return None
 
-    def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
+    def fetch(self, game: str, time_range: str, limit: int = 100) -> FetchResult:
         appid = self._search_appid(game)
         if not appid:
             raise SourceUnavailableError(f"未在Steam商店找到游戏: {game}")
@@ -239,14 +243,16 @@ class SteamSource(BaseSource):
                 base_s = 0.8 if voted_up else 0.2
                 sentiment = (base_s + _estimate_sentiment(content)) / 2
                 url = f"https://steamcommunity.com/app/{appid}/recommended/{rid}/"
+                ts = rev.get("timestamp_created") or rev.get("timestamp_updated") or 0
                 reviews.append({
                     "source": "steam",
                     "post_id": f"steam_{rid}",
                     "content": content,
-                    "author": f"steam_{author[:10]}",
+                    "author": f"steam_{str(author)[:10]}",
                     "url": url,
                     "sentiment": sentiment,
-                    "created_at": rev.get("timestamp_created", int(time.time())),
+                    "created_at": int(ts) if ts else 0,
+                    "time_unknown": not bool(ts),
                     "priority": 0,
                 })
             cursor = data.get("cursor")
@@ -259,13 +265,19 @@ class SteamSource(BaseSource):
         for r in reviews:
             r["priority"] = _calc_priority(r["content"], r["sentiment"])
 
-        filtered = _filter_by_time(reviews, time_range)
+        filtered, time_unknown_cnt, filtered_out = _filter_by_time(reviews, time_range)
         filtered.sort(key=lambda x: x["priority"], reverse=True)
-        return filtered[:limit]
+        filtered = filtered[:limit]
+
+        return FetchResult(filtered, {
+            "raw_count": len(reviews),
+            "time_unknown_count": time_unknown_cnt,
+            "filtered_out_by_time": filtered_out,
+        })
 
 
 # =====================================================================
-# TapTap 源：使用 webapiv2 搜索应用 + 评论接口
+# TapTap 源
 # =====================================================================
 class TapTapSource(BaseSource):
     name = "taptap"
@@ -292,7 +304,7 @@ class TapTapSource(BaseSource):
             return None
         return {"id": app_id, "title": title}
 
-    def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
+    def fetch(self, game: str, time_range: str, limit: int = 100) -> FetchResult:
         app = self._search_app(game)
         if not app:
             raise SourceUnavailableError(f"未在TapTap找到游戏: {game}")
@@ -301,13 +313,23 @@ class TapTapSource(BaseSource):
         posts: List[Dict] = []
         seen_ids = set()
 
+        def _parse_ts(val) -> int:
+            if isinstance(val, (int, float)) and val > 0:
+                return int(val)
+            if isinstance(val, str):
+                val = val.strip()
+                if val.isdigit() and int(val) > 0:
+                    return int(val)
+                try:
+                    import time as _t
+                    return int(_t.mktime(_t.strptime(val[:19], "%Y-%m-%d %H:%M:%S")))
+                except Exception:
+                    return 0
+            return 0
+
         review_data = self._http_get(
             "https://www.taptap.cn/webapiv2/review",
-            params={
-                "app_id": app_id,
-                "limit": str(min(limit, 50)),
-                "sort": "new",
-            },
+            params={"app_id": app_id, "limit": str(min(limit, 50)), "sort": "new"},
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
         if isinstance(review_data, dict):
@@ -328,18 +350,12 @@ class TapTapSource(BaseSource):
                 if not content:
                     continue
                 rating = item.get("star") or item.get("rating") or item.get("score") or 3
-                base_s = ((float(rating) if isinstance(rating, (int, float)) else 3.0) - 1) / 4
+                try:
+                    base_s = (float(rating) - 1) / 4
+                except (TypeError, ValueError):
+                    base_s = 0.5
                 sentiment = (base_s + _estimate_sentiment(content)) / 2
-                created_at = item.get("created_at") or item.get("create_time") or item.get("updated_at")
-                if isinstance(created_at, (int, float)):
-                    ts = int(created_at)
-                elif isinstance(created_at, str):
-                    try:
-                        ts = int(time.mktime(time.strptime(created_at[:19], "%Y-%m-%d %H:%M:%S")))
-                    except Exception:
-                        ts = int(time.time())
-                else:
-                    ts = int(time.time())
+                ts = _parse_ts(item.get("created_at") or item.get("create_time") or item.get("updated_at"))
                 url = f"https://www.taptap.cn/app/{app_id}/review/{rid}"
                 posts.append({
                     "source": "taptap",
@@ -349,6 +365,7 @@ class TapTapSource(BaseSource):
                     "url": url,
                     "sentiment": sentiment,
                     "created_at": ts,
+                    "time_unknown": ts == 0,
                     "priority": 0,
                 })
 
@@ -362,9 +379,15 @@ class TapTapSource(BaseSource):
         for r in posts:
             r["priority"] = _calc_priority(r["content"], r["sentiment"])
 
-        filtered = _filter_by_time(posts, time_range)
+        filtered, time_unknown_cnt, filtered_out = _filter_by_time(posts, time_range)
         filtered.sort(key=lambda x: x["priority"], reverse=True)
-        return filtered[:limit]
+        filtered = filtered[:limit]
+
+        return FetchResult(filtered, {
+            "raw_count": len(posts),
+            "time_unknown_count": time_unknown_cnt,
+            "filtered_out_by_time": filtered_out,
+        })
 
     def _fallback_search_taptap(self, game: str, limit: int) -> List[Dict]:
         data = self._http_get(
@@ -390,7 +413,13 @@ class TapTapSource(BaseSource):
             content = str(it.get("contents") or it.get("summary") or it.get("title") or "").strip()
             if not content:
                 continue
-            ts = int(time.time()) - random.randint(0, 3 * 3600)
+            ts_raw = it.get("created_at") or it.get("create_time") or 0
+            if isinstance(ts_raw, (int, float)) and ts_raw > 0:
+                ts = int(ts_raw)
+                tu = False
+            else:
+                ts = 0
+                tu = True
             out.append({
                 "source": "taptap",
                 "post_id": f"taptap_topic_{tid}",
@@ -399,18 +428,19 @@ class TapTapSource(BaseSource):
                 "url": f"https://www.taptap.cn/topic/{tid}",
                 "sentiment": _estimate_sentiment(content),
                 "created_at": ts,
+                "time_unknown": tu,
                 "priority": 0,
             })
         return out
 
 
 # =====================================================================
-# B站 源：搜索视频接口，返回视频标题+简介内容
+# B站 源
 # =====================================================================
 class BilibiliSource(BaseSource):
     name = "bilibili"
 
-    def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
+    def fetch(self, game: str, time_range: str, limit: int = 100) -> FetchResult:
         keyword = f"{game} 反馈"
         data = self._http_get(
             "https://api.bilibili.com/x/web-interface/search/type",
@@ -418,7 +448,8 @@ class BilibiliSource(BaseSource):
             headers={"Referer": "https://search.bilibili.com/"},
         )
         if not isinstance(data, dict) or data.get("code") != 0:
-            raise SourceUnavailableError(f"B站搜索失败: {data.get('message') if isinstance(data, dict) else '格式异常'}")
+            msg = data.get("message") if isinstance(data, dict) else "格式异常"
+            raise SourceUnavailableError(f"B站搜索失败: {msg}")
 
         result = (data.get("data") or {}).get("result") or []
         if not result:
@@ -437,10 +468,12 @@ class BilibiliSource(BaseSource):
                 continue
             author = str(v.get("author") or v.get("uname") or "b站用户")
             pub = v.get("pubdate") or v.get("senddate")
-            if isinstance(pub, (int, float)):
+            if isinstance(pub, (int, float)) and pub > 0:
                 ts = int(pub)
+                tu = False
             else:
-                ts = int(time.time()) - random.randint(0, 24 * 3600)
+                ts = 0
+                tu = True
             url = f"https://www.bilibili.com/video/{bvid}" if bvid else f"https://www.bilibili.com/video/av{aid}"
             sentiment = _estimate_sentiment(content)
             posts.append({
@@ -451,6 +484,7 @@ class BilibiliSource(BaseSource):
                 "url": url,
                 "sentiment": sentiment,
                 "created_at": ts,
+                "time_unknown": tu,
                 "priority": 0,
             })
 
@@ -460,18 +494,24 @@ class BilibiliSource(BaseSource):
         for r in posts:
             r["priority"] = _calc_priority(r["content"], r["sentiment"])
 
-        filtered = _filter_by_time(posts, time_range)
+        filtered, time_unknown_cnt, filtered_out = _filter_by_time(posts, time_range)
         filtered.sort(key=lambda x: x["priority"], reverse=True)
-        return filtered[:limit]
+        filtered = filtered[:limit]
+
+        return FetchResult(filtered, {
+            "raw_count": len(posts),
+            "time_unknown_count": time_unknown_cnt,
+            "filtered_out_by_time": filtered_out,
+        })
 
 
 # =====================================================================
-# 贴吧 源：搜索接口
+# 贴吧 源
 # =====================================================================
 class TiebaSource(BaseSource):
     name = "tieba"
 
-    def fetch(self, game: str, time_range: str, limit: int = 100) -> List[Dict]:
+    def fetch(self, game: str, time_range: str, limit: int = 100) -> FetchResult:
         posts: List[Dict] = []
 
         kw = game.strip()
@@ -508,8 +548,10 @@ class TiebaSource(BaseSource):
             if time_node:
                 ttxt = time_node.get_text(strip=True)
                 ts = self._parse_tieba_time(ttxt)
+                tu = (ts == 0)
             else:
-                ts = int(time.time()) - random.randint(0, 72 * 3600)
+                ts = 0
+                tu = True
             url = f"https://tieba.baidu.com{href}" if href.startswith("/") else (href or f"https://tieba.baidu.com/f?kw={kw}")
             sentiment = _estimate_sentiment(content)
             posts.append({
@@ -520,6 +562,7 @@ class TiebaSource(BaseSource):
                 "url": url,
                 "sentiment": sentiment,
                 "created_at": ts,
+                "time_unknown": tu,
                 "priority": 0,
             })
 
@@ -529,9 +572,15 @@ class TiebaSource(BaseSource):
         for r in posts:
             r["priority"] = _calc_priority(r["content"], r["sentiment"])
 
-        filtered = _filter_by_time(posts, time_range)
+        filtered, time_unknown_cnt, filtered_out = _filter_by_time(posts, time_range)
         filtered.sort(key=lambda x: x["priority"], reverse=True)
-        return filtered[:limit]
+        filtered = filtered[:limit]
+
+        return FetchResult(filtered, {
+            "raw_count": len(posts),
+            "time_unknown_count": time_unknown_cnt,
+            "filtered_out_by_time": filtered_out,
+        })
 
     def _parse_tieba_time(self, txt: str) -> int:
         now = int(time.time())
@@ -541,22 +590,29 @@ class TiebaSource(BaseSource):
             try:
                 return int(time.mktime(time.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)} 12:00:00", "%Y-%m-%d %H:%M:%S")))
             except Exception:
-                pass
+                return 0
         m = re.match(r"(\d{1,2})-(\d{1,2})", txt)
         if m:
             y = time.localtime().tm_year
             try:
                 return int(time.mktime(time.strptime(f"{y}-{m.group(1)}-{m.group(2)} 12:00:00", "%Y-%m-%d %H:%M:%S")))
             except Exception:
-                pass
-        if "分钟前" in txt or "小时前" in txt:
-            h = 1 if "分钟" in txt else 6
-            return now - h * 3600
+                return 0
+        if "分钟前" in txt:
+            m = re.match(r"(\d+)", txt)
+            minutes = int(m.group(1)) if m else 5
+            return now - minutes * 60
+        if "小时前" in txt:
+            m = re.match(r"(\d+)", txt)
+            hours = int(m.group(1)) if m else 6
+            return now - hours * 3600
         if "昨天" in txt:
             return now - 24 * 3600
         if "前天" in txt:
             return now - 48 * 3600
-        return now - random.randint(1, 72) * 3600
+        if "今天" in txt:
+            return now - 3600
+        return 0
 
 
 _SOURCE_MAP = {
@@ -582,16 +638,24 @@ def fetch_all(
 ) -> Tuple[List[Dict], Dict[str, Dict]]:
     """
     返回 (所有帖子, 每个来源的状态字典)
-    状态格式: {source_name: {"ok": True, "count": N} | {"ok": False, "reason": str}}
+    状态格式:
+      成功: {"ok": True, "count": N, "raw_count": N, "time_unknown_count": N, "filtered_out_by_time": N}
+      失败: {"ok": False, "reason": str}
     """
     all_posts: List[Dict] = []
     statuses: Dict[str, Dict] = {}
     for src_name in sources:
         try:
             src = get_source(src_name)
-            posts = src.fetch(game, time_range, limit=per_source_limit)
-            all_posts.extend(posts)
-            statuses[src_name] = {"ok": True, "count": len(posts)}
+            result = src.fetch(game, time_range, limit=per_source_limit)
+            all_posts.extend(result.posts)
+            statuses[src_name] = {
+                "ok": True,
+                "count": len(result.posts),
+                "raw_count": result.stats["raw_count"],
+                "time_unknown_count": result.stats["time_unknown_count"],
+                "filtered_out_by_time": result.stats["filtered_out_by_time"],
+            }
         except SourceUnavailableError as e:
             statuses[src_name] = {"ok": False, "reason": str(e)}
         except Exception as e:

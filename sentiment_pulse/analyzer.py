@@ -119,6 +119,164 @@ def detect_alerts(
     return alerts
 
 
+def merge_synonym_freqs(
+    keyword_freq: Dict[str, int],
+    synonym_groups: List[Dict],
+) -> Dict[str, Dict]:
+    """
+    按同义词组合并词频，返回 {group_label: {total, breakdown}}
+    """
+    merged: Dict[str, Dict] = {}
+    k_lower_to_orig = {k.lower(): k for k in keyword_freq.keys()}
+    for g in synonym_groups:
+        label = g["label"]
+        words = [w.lower() for w in g["words"]]
+        total = 0
+        breakdown = {}
+        for w in words:
+            if w in k_lower_to_orig:
+                orig = k_lower_to_orig[w]
+                cnt = keyword_freq[orig]
+                total += cnt
+                breakdown[orig] = cnt
+        if total > 0:
+            merged[label] = {
+                "total": total,
+                "breakdown": breakdown,
+                "words": g["words"],
+            }
+    return merged
+
+
+def compute_group_changes(
+    current_groups: Dict[str, Dict],
+    previous_groups: Dict[str, Dict],
+) -> Dict[str, Dict]:
+    """计算同义词组级别的变化"""
+    changes = {}
+    all_labels = set(current_groups.keys()) | set(previous_groups.keys())
+    for label in all_labels:
+        cur = current_groups.get(label, {}).get("total", 0)
+        prev = previous_groups.get(label, {}).get("total", 0)
+        if cur == 0 and prev == 0:
+            continue
+        if prev > 0:
+            ratio = cur / prev
+            delta = cur - prev
+        else:
+            ratio = float("inf") if cur > 0 else 1.0
+            delta = cur
+        changes[label] = {
+            "label": label,
+            "current": cur,
+            "previous": prev,
+            "delta": delta,
+            "ratio": ratio,
+            "is_new": prev == 0 and cur > 0,
+            "breakdown": current_groups.get(label, {}).get("breakdown", {}),
+            "prev_breakdown": previous_groups.get(label, {}).get("breakdown", {}),
+        }
+    return changes
+
+
+def detect_group_alerts(
+    group_changes: Dict[str, Dict],
+    watchlist: List[Dict],
+    synonym_groups: List[Dict],
+    threshold: float = ALERT_CHANGE_THRESHOLD,
+    min_count: int = ALERT_MIN_COUNT,
+) -> List[Dict]:
+    """检测同义词组级别的告警"""
+    watch_kw_lower = {w["keyword"].lower(): w for w in watchlist}
+    group_map = {g["label"]: g for g in synonym_groups}
+    alerts = []
+    for label, info in group_changes.items():
+        g = group_map.get(label)
+        if not g:
+            continue
+        watched = False
+        t = threshold
+        # 判断是否命中关注清单：组内任意词在关注清单即视为关注
+        for w in g["words"]:
+            wl = watch_kw_lower.get(w.lower())
+            if wl:
+                watched = True
+                t = min(t, wl["threshold"])
+                break
+        cur = info["current"]
+        if cur < min_count:
+            continue
+        ratio = info["ratio"]
+        if info["is_new"] and cur >= min_count:
+            alerts.append({
+                "label": label,
+                "type": "new",
+                "current": cur,
+                "previous": 0,
+                "delta": cur,
+                "ratio": "NEW",
+                "watched": watched,
+                "words": g["words"],
+                "breakdown": info["breakdown"],
+                "is_group": True,
+            })
+        elif ratio >= t:
+            alerts.append({
+                "label": label,
+                "type": "spike",
+                "current": cur,
+                "previous": info["previous"],
+                "delta": info["delta"],
+                "ratio": round(ratio, 1),
+                "watched": watched,
+                "words": g["words"],
+                "breakdown": info["breakdown"],
+                "is_group": True,
+            })
+    alerts.sort(key=lambda a: (0 if a["watched"] else 1, -a["current"]))
+    return alerts
+
+
+def find_representative_posts(
+    posts: List[Dict],
+    words: List[str],
+    max_n: int = 3,
+) -> List[Dict]:
+    """
+    为一组同义词找到代表性帖子，找最具代表性（负面/最常出现的原句
+    """
+    matched = []
+    words_lower = [w.lower() for w in words]
+    for p in posts:
+        content_lower = p.get("content", "").lower()
+        hit = any(w in content_lower for w in words_lower)
+        if hit:
+            matched.append(p)
+    # 按情感负面程度 + 匹配词数排序
+    def _score(p):
+        c = p.get("content", "").lower()
+        hits = sum(1 for w in words_lower if w in c)
+        return -p.get("sentiment", 0.5) - hits * 0.1
+    matched.sort(key=_score)
+    result = []
+    seen = set()
+    for p in matched:
+        snippet = p.get("content", "")[:120]
+        if snippet in seen:
+            continue
+        seen.add(snippet)
+        result.append({
+            "content": p.get("content", ""),
+            "source": p.get("source", ""),
+            "author": p.get("author", ""),
+            "url": p.get("url", ""),
+            "sentiment": p.get("sentiment", 0.5),
+        })
+        if len(result) >= max_n:
+            break
+    return result
+
+
 _SPAM_PATTERNS = [
     r"^(.+?)\1{2,}$",
     r"^(.)\1{5,}$",
@@ -231,11 +389,14 @@ def analyze(
     posts: List[Dict],
     previous_freq: Dict[str, int] = None,
     watchlist: List[Dict] = None,
+    synonym_groups: List[Dict] = None,
 ) -> Dict:
     if previous_freq is None:
         previous_freq = {}
     if watchlist is None:
         watchlist = []
+    if synonym_groups is None:
+        synonym_groups = []
 
     keyword_freq = dict(count_keywords(posts, top_n=50))
     changes = compute_keyword_changes(keyword_freq, previous_freq)
@@ -256,12 +417,29 @@ def analyze(
     top_links = extract_top_links(posts)
     sentiment_summary = summarize_sentiment(posts)
 
+    # 同义词组分析
+    group_alerts = []
+    group_freq_current = {}
+    group_freq_prev = {}
+    if synonym_groups:
+        group_freq_current = merge_synonym_freqs(keyword_freq, synonym_groups)
+        group_freq_prev = merge_synonym_freqs(previous_freq, synonym_groups)
+        group_changes = compute_group_changes(group_freq_current, group_freq_prev)
+        group_alerts = detect_group_alerts(group_changes, watchlist, synonym_groups)
+        # 为每个组告警附上代表原句
+        for ga in group_alerts:
+            reps = find_representative_posts(posts, ga.get("words", []), max_n=3)
+            ga["representative_posts"] = reps
+
     return {
         "keyword_freq": keyword_freq,
         "changes": changes,
         "alerts": alerts,
+        "group_alerts": group_alerts,
         "top_keywords": top_keywords,
         "negative_snippets": negative_snippets,
         "top_links": top_links,
         "sentiment": sentiment_summary,
+        "synonym_groups_current": group_freq_current,
+        "synonym_groups_prev": group_freq_prev,
     }
